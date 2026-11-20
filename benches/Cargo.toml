@@ -1,0 +1,26 @@
+[package]
+name = "fx-bench"
+description = "Benchmarks criterion et générateur de jeux de fichiers de test."
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gen-fixtures"
+path = "src/gen_fixtures.rs"
+
+[[bench]]
+name = "listing"
+harness = false
+
+[[bench]]
+name = "sort"
+harness = false
+
+[dev-dependencies]
+criterion.workspace = true
+fx-core.workspace = true
+fx-win.workspace = true
+
+[lints]
+workspace = true
