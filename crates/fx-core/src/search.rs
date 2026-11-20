@@ -199,6 +199,13 @@ impl VolumeIndex {
         self.by_rec[r] = index;
     }
 
+    /// Élément indexé sous l'enregistrement `rec` : (parent, nom, dossier ?).
+    pub fn item(&self, rec: u32) -> Option<(u32, &str, bool)> {
+        let i = self.slot(rec)?;
+        let it = &self.items[i];
+        Some((it.parent, self.name(i), it.flags & flag::DIR != 0))
+    }
+
     /// L'enregistrement `rec` est-il indexé ?
     pub fn contains(&self, rec: u32) -> bool {
         self.slot(rec).is_some()

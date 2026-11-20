@@ -717,6 +717,7 @@ fn apply(ix: &mut VolumeIndex, root: &Path, serial: u32, changes: Vec<DirChange>
             set.insert((p, name.to_string_lossy().to_lowercase()));
         }
     }
+    let mut seen = std::collections::HashMap::new();
     let dirs = ix.remove_named(&removed);
     ix.remove_under(&dirs.into_iter().collect());
     ix.remove_named(&renamed);
@@ -735,7 +736,7 @@ fn apply(ix: &mut VolumeIndex, root: &Path, serial: u32, changes: Vec<DirChange>
         let Some(rec) = record_of(r).filter(|_| s == serial && r != 0) else {
             continue;
         };
-        let Some(parent_rec) = ensure_dir(ix, parent, serial) else {
+        let Some(parent_rec) = ensure_dir(ix, parent, serial, &mut seen) else {
             continue;
         };
         ix.upsert(rec, parent_rec, &entry.name, entry.attributes);
@@ -746,18 +747,34 @@ fn apply(ix: &mut VolumeIndex, root: &Path, serial: u32, changes: Vec<DirChange>
 
 /// Enregistrement du dossier `dir`, en l'indexant avec ses ancêtres manquants (dossiers créés
 /// pendant que l'application était fermée, ou avant le démarrage de la surveillance).
-fn ensure_dir(ix: &mut VolumeIndex, dir: &Path, serial: u32) -> Option<u32> {
+fn ensure_dir(
+    ix: &mut VolumeIndex,
+    dir: &Path,
+    serial: u32,
+    seen: &mut std::collections::HashMap<PathBuf, u32>,
+) -> Option<u32> {
     let Some(up) = dir.parent() else {
         return Some(ROOT_REC);
     };
-    let rec = record_of_path(dir, serial)?;
-    if ix.contains(rec) {
+    if let Some(&rec) = seen.get(dir) {
         return Some(rec);
     }
-    let parent = ensure_dir(ix, up, serial)?;
-    let name: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(dir.file_name()?).collect();
-    let entry = stat_entry(up, &name)?;
-    ix.upsert(rec, parent, &entry.name, entry.attributes);
+    let rec = record_of_path(dir, serial)?;
+    let parent = ensure_dir(ix, up, serial, seen)?;
+    let name = dir.file_name()?;
+    // NTFS réutilise les numéros d'enregistrement : un numéro déjà indexé peut désigner un
+    // élément supprimé depuis (index relu d'un cache). On vérifie qu'il s'agit bien de ce
+    // dossier, sinon on le remplace.
+    let wanted = name.to_string_lossy().to_lowercase();
+    let matches = ix
+        .item(rec)
+        .is_some_and(|(p, n, is_dir)| is_dir && p == parent && n.to_lowercase() == wanted);
+    if !matches {
+        let wide: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(name).collect();
+        let entry = stat_entry(up, &wide)?;
+        ix.upsert(rec, parent, &entry.name, entry.attributes);
+    }
+    seen.insert(dir.to_path_buf(), rec);
     Some(rec)
 }
 
@@ -853,14 +870,17 @@ mod tests {
         std::fs::create_dir(&sub)?;
         let file = sub.join("notes-zephyrine.txt");
         std::fs::write(&file, b"x")?;
+        // Numéro d'enregistrement réutilisé : l'index (relu d'un cache périmé) le croit encore
+        // attribué à un fichier supprimé depuis.
+        let sub_rec = record_of_path(&sub, serial).ok_or("enregistrement")?;
+        ix.upsert(sub_rec, ROOT_REC, &wide("ancien-fichier.json"), 0x20);
         apply(
             &mut ix,
             &root,
             serial,
-            vec![
-                DirChange::Added(rel(&root, &sub)),
-                DirChange::Added(rel(&root, &file)),
-            ],
+            // Seule la création du fichier est signalée (dossier créé avant la surveillance) :
+            // le dossier est ajouté, et l'élément périmé remplacé, en remontant les parents.
+            vec![DirChange::Added(rel(&root, &file))],
         );
         assert_eq!(found(&ix, "zephyrine"), [file.display().to_string()]);
 
@@ -892,7 +912,7 @@ mod tests {
         );
         assert!(found(&ix, "zéphyr").is_empty());
         assert!(found(&ix, "zephyrine").is_empty());
-        let _ = wide("");
+        assert!(found(&ix, "ancien-fichier").is_empty(), "élément périmé remplacé");
         Ok(())
     }
 }

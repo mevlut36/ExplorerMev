@@ -212,6 +212,8 @@ pub(crate) struct App {
     pub(crate) search_latencies: RefCell<Vec<(f64, f64)>>,
     /// Auto-test : début de l'attente de l'index.
     search_wait: RefCell<Option<Instant>>,
+    /// Auto-test : début de l'attente de l'étape en cours.
+    self_test_since: RefCell<Option<Instant>>,
     preview_visible: Cell<bool>,
     preview_seq: Cell<u64>,
     preview_host: RefCell<Option<ShellHost>>,
@@ -283,6 +285,7 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         search_index_status: RefCell::default(),
         search_latencies: RefCell::default(),
         search_wait: RefCell::default(),
+        self_test_since: RefCell::default(),
         preview_visible: Cell::new(false),
         preview_seq: Cell::new(0),
         preview_host: RefCell::new(None),
@@ -1049,9 +1052,8 @@ impl App {
                  reste à jour sans surveiller les dossiers.\n\nCela demande les droits \
                  d'administration : Windows va afficher une demande de confirmation. Un petit \
                  assistant tourne alors avec ces droits jusqu'à la fermeture de WinDir ; il ne \
-                 fait que lire et transmettre les noms des fichiers.\n\nLa recherche montrera \
-                 aussi les noms des fichiers de dossiers que votre compte ne peut pas ouvrir \
-                 (sans leur contenu).\n\nContinuer ?",
+                 fait que lire et transmettre les noms des fichiers, et seulement ceux des \
+                 dossiers que votre compte peut ouvrir.\n\nContinuer ?",
             );
             if ok {
                 post(|a| {
@@ -1800,6 +1802,29 @@ impl App {
 
     /// Scénario d'auto-test : chaque étape agit comme l'utilisateur (mêmes fonctions que les
     /// callbacks de l'interface), vérifie le résultat, puis planifie la suivante.
+    /// Auto-test : si `ok` est faux, refait l'étape `step` dans 200 ms, au plus 5 s en tout
+    /// (les délais fixes échouent sur une machine chargée). Renvoie `true` si l'étape est
+    /// reportée.
+    fn self_test_retry(self: &Rc<Self>, step: usize, dir: &Path, ok: bool) -> bool {
+        let started = *self.self_test_since.borrow_mut().get_or_insert(Instant::now());
+        if !ok && started.elapsed() < Duration::from_secs(5) {
+            let d = dir.to_path_buf();
+            slint::Timer::single_shot(Duration::from_millis(200), move || {
+                with_app(|a| a.self_test_step(step, d))
+            });
+            return true;
+        }
+        if started.elapsed() > Duration::from_millis(250) {
+            tracing::info!(
+                step,
+                attente_ms = started.elapsed().as_millis() as u64,
+                "auto-test : condition attendue"
+            );
+        }
+        *self.self_test_since.borrow_mut() = None;
+        false
+    }
+
     fn self_test_step(self: &Rc<Self>, step: usize, dir: PathBuf) {
         let next = |delay_ms: u64, d: PathBuf| {
             slint::Timer::single_shot(Duration::from_millis(delay_ms), move || {
@@ -1826,6 +1851,9 @@ impl App {
             2 => {
                 let ui = p.ui_snapshot();
                 let renaming = p.st.borrow().rename_entry.is_some();
+                if self.self_test_retry(step, &dir, renaming && ui.rename_row >= 0) {
+                    return;
+                }
                 self.check(
                     renaming && ui.rename_row >= 0,
                     "nouveau dossier créé et passé en renommage",
@@ -2166,11 +2194,21 @@ impl App {
                 let rows = self.search_rows.borrow().clone();
                 let expected = dir.join(format!("fx-recherche-{}-zq.txt", std::process::id()));
                 let ok = rows.len() == 1 && same_path(Path::new(&rows[0].path), &expected);
+                if self.self_test_retry(step, &dir, ok) {
+                    // La surveillance n'a peut-être pas encore livré la création : on relance
+                    // la requête.
+                    self.search_edited(&format!("fx-recherche-{}-zq", std::process::id()));
+                    return;
+                }
                 self.check(
                     ok,
                     &format!(
-                        "fichier créé trouvé par la recherche ({} résultat(s))",
-                        rows.len()
+                        "fichier créé trouvé par la recherche ({} résultat(s){})",
+                        rows.len(),
+                        rows.first()
+                            .filter(|_| !ok)
+                            .map(|r| format!(" : {} au lieu de {}", r.path, expected.display()))
+                            .unwrap_or_default()
                     ),
                 );
                 self.search_run(0, false);

@@ -56,6 +56,8 @@ pub struct UsnRecord {
     pub usn: i64,
     pub reason: u32,
     pub attributes: u32,
+    /// Identifiant du descripteur de sécurité (partagé dans `$Secure`).
+    pub security_id: u32,
     pub name: Vec<u16>,
 }
 
@@ -103,7 +105,9 @@ pub fn parse_records(mut b: &[u8], mut f: impl FnMut(UsnRecord)) {
         ) else {
             return;
         };
-        let (Some(name_len), Some(name_off)) = (u16_at(rec, 56), u16_at(rec, 58)) else {
+        let (Some(name_len), Some(name_off), Some(security_id)) =
+            (u16_at(rec, 56), u16_at(rec, 58), u32_at(rec, 48))
+        else {
             return;
         };
         let (name_len, name_off) = (name_len as usize, name_off as usize);
@@ -122,6 +126,7 @@ pub fn parse_records(mut b: &[u8], mut f: impl FnMut(UsnRecord)) {
             usn: usn as i64,
             reason,
             attributes,
+            security_id,
             name,
         });
     }
@@ -250,6 +255,37 @@ impl Volume {
             parse_records(&out[8..n], &mut f);
             usn = next;
         }
+    }
+}
+
+impl Volume {
+    /// Descripteur de sécurité (propriétaire, groupe, DACL) de l'élément `frn` du volume,
+    /// ouvert par identifiant (`OpenFileById`, droit `READ_CONTROL` seulement).
+    pub fn security_of(&self, frn: u64) -> io::Result<crate::access::SecurityDescriptor> {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_SHARE_DELETE,
+            FileIdType, OpenFileById, READ_CONTROL,
+        };
+        let id = FILE_ID_DESCRIPTOR {
+            dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32,
+            Type: FileIdType,
+            Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: frn as i64 },
+        };
+        // SAFETY: handle de volume valide (indice de volume) ; descripteur local ; le handle
+        // renvoyé est possédé puis fermé.
+        let h = unsafe {
+            OpenFileById(
+                self.handle,
+                &id,
+                READ_CONTROL.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                FILE_FLAG_BACKUP_SEMANTICS,
+            )
+        }
+        .map_err(io::Error::from)?;
+        let h = crate::handle::OwnedHandle(h);
+        crate::access::SecurityDescriptor::of_handle(h.0)
     }
 }
 

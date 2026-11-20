@@ -6,6 +6,7 @@
 
 #![cfg(windows)]
 
+pub mod access;
 pub mod clipboard;
 pub mod com;
 pub mod context_menu;
