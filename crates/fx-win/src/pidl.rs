@@ -7,7 +7,7 @@ use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{ILFindLastID, ILFree, IShellFolder, SHBindToParent, SHParseDisplayName};
 use windows::core::{Interface, PCWSTR};
 
-use crate::path::{display_form, wide_nul};
+use crate::path::shell_path;
 
 /// PIDL absolu possédé, libéré par `ILFree`.
 pub(crate) struct Pidl(*mut ITEMIDLIST);
@@ -16,7 +16,7 @@ impl Pidl {
     /// Analyse un chemin du système de fichiers (forme affichable, sans `\\?\` que le Shell
     /// n'accepte pas partout).
     pub(crate) fn parse(path: &Path) -> windows::core::Result<Self> {
-        let wide = wide_nul(display_form(path).as_os_str());
+        let wide = shell_path(path);
         let mut p: *mut ITEMIDLIST = std::ptr::null_mut();
         // SAFETY: `wide` est terminé par un nul ; `p` reçoit un PIDL alloué par le Shell, dont
         // nous devenons propriétaires (libéré dans Drop).

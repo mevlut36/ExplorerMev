@@ -19,6 +19,26 @@ pub fn group_thousands(v: u64) -> String {
     out
 }
 
+/// Taille lisible, à la française : « 512 octets », « 12,4 Ko », « 3,0 Go ».
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["Ko", "Mo", "Go", "To", "Po"];
+    if bytes < 1024 {
+        return format!("{bytes} octets");
+    }
+    let mut v = bytes as f64 / 1024.0;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    let s = if v < 100.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v:.0}")
+    };
+    format!("{} {}", s.replace('.', ","), UNITS[u])
+}
+
 /// « 1 élément », « 12 345 éléments ».
 pub fn item_count(n: usize) -> String {
     if n == 1 {
@@ -39,6 +59,16 @@ mod tests {
         assert_eq!(size_kb(1024), "1 Ko");
         assert_eq!(size_kb(1025), "2 Ko");
         assert_eq!(size_kb(1_048_576_000), "1\u{202F}024\u{202F}000 Ko");
+    }
+
+    #[test]
+    fn human_sizes() {
+        assert_eq!(human_size(0), "0 octets");
+        assert_eq!(human_size(1023), "1023 octets");
+        assert_eq!(human_size(1536), "1,5 Ko");
+        assert_eq!(human_size(13_002_342), "12,4 Mo");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3,0 Go");
+        assert_eq!(human_size(500 * 1024 * 1024), "500 Mo");
     }
 
     #[test]

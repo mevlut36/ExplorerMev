@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCSTR, PCWSTR, PSTR};
 
-use crate::path::{display_form, wide_nul};
+use crate::path::shell_path;
 use crate::pidl::ui_object_of;
 use crate::shell_host::{HostCtx, TIMER_DISMISS_MENU, set_active_menu};
 
@@ -61,7 +61,7 @@ pub struct MenuOptions {
 fn context_menu_for(owner: HWND, folder: &Path, items: &[PathBuf]) -> windows::core::Result<IContextMenu> {
     if items.is_empty() {
         // Menu de fond de dossier (Nouveau, Coller, Propriétés…).
-        let wide = wide_nul(display_form(folder).as_os_str());
+        let wide = shell_path(folder);
         // SAFETY: chaîne terminée par un nul ; objets COM possédés.
         unsafe {
             let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)?;
@@ -194,7 +194,7 @@ fn invoke(
     folder: &Path,
     opts: MenuOptions,
 ) -> windows::core::Result<()> {
-    let dir = wide_nul(display_form(folder).as_os_str());
+    let dir = shell_path(folder);
     let info = CMINVOKECOMMANDINFOEX {
         cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
         fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,

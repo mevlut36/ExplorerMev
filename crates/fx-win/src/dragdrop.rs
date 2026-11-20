@@ -240,15 +240,15 @@ impl Drop for DropRegistration {
     }
 }
 
-/// Fait de la fenêtre `hwnd` une cible de dépôt de fichiers. À appeler sur son thread, initialisé
-/// par OLE.
-pub fn register(hwnd: isize, handler: Box<dyn DropHandler>) -> windows::core::Result<DropRegistration> {
+/// Crée l'objet `IDropTarget` (sans l'enregistrer) : utilisé par [`register`] et par les tests,
+/// qui l'appellent comme le ferait OLE.
+pub fn new_target(hwnd: isize, handler: Box<dyn DropHandler>) -> IDropTarget {
     let hwnd = HWND(hwnd as *mut _);
     // SAFETY: création d'un objet COM in-process ; un échec n'empêche pas le dépôt (pas
     // d'image de glissement).
     let helper: Option<IDropTargetHelper> =
         unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER) }.ok();
-    let target: IDropTarget = DropTarget {
+    DropTarget {
         hwnd,
         handler,
         helper,
@@ -256,11 +256,25 @@ pub fn register(hwnd: isize, handler: Box<dyn DropHandler>) -> windows::core::Re
         dest: RefCell::default(),
         effect: Cell::new(EFFECT_NONE),
     }
-    .into();
+    .into()
+}
+
+/// Fait de la fenêtre `hwnd` une cible de dépôt de fichiers. À appeler sur son thread, initialisé
+/// par OLE.
+pub fn register(hwnd: isize, handler: Box<dyn DropHandler>) -> windows::core::Result<DropRegistration> {
+    let target = new_target(hwnd, handler);
+    let hwnd = HWND(hwnd as *mut _);
     // SAFETY: HWND de notre fenêtre, thread OLE (exigence documentée) ; OLE garde une référence
     // à la cible jusqu'à RevokeDragDrop.
     unsafe { RegisterDragDrop(hwnd, &target)? };
     Ok(DropRegistration { hwnd })
+}
+
+/// Objet de données du Shell pour des fichiers d'un même dossier (celui que l'Explorateur
+/// fournit au glisser-déposer et au presse-papiers).
+pub fn data_object(paths: &[PathBuf]) -> windows::core::Result<IDataObject> {
+    let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    ui_object_of(HWND::default(), &refs)
 }
 
 /// Lance le glissement de fichiers d'un même dossier. Bloque (boucle modale d'OLE) jusqu'au

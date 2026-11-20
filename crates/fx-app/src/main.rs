@@ -21,6 +21,7 @@ Options :
   --no-mica                   fond opaque au lieu de Mica
   --bench-startup             mesure le démarrage, affiche les durées et quitte
   --bench-open <dossier>      mesure l'ouverture de <dossier> (cache chaud) et quitte
+  --self-test <dossier vide>  scénario d'auto-test dans ce dossier (créé et modifié !), puis quitte
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
   --out <fichier>             écrit aussi le rapport de mesure dans <fichier>
   -h, --help                  affiche cette aide
@@ -33,6 +34,7 @@ struct Args {
     mica: bool,
     bench_startup: bool,
     bench_open: Option<PathBuf>,
+    self_test: Option<PathBuf>,
     iterations: usize,
     out: Option<PathBuf>,
     help: bool,
@@ -45,6 +47,7 @@ fn parse_args() -> anyhow::Result<Args> {
         mica: true,
         bench_startup: false,
         bench_open: None,
+        self_test: None,
         iterations: 3,
         out: None,
         help: false,
@@ -64,6 +67,9 @@ fn parse_args() -> anyhow::Result<Args> {
             Some("--bench-startup") => a.bench_startup = true,
             Some("--bench-open") => {
                 a.bench_open = Some(it.next().context("--bench-open attend un dossier")?.into())
+            }
+            Some("--self-test") => {
+                a.self_test = Some(it.next().context("--self-test attend un dossier")?.into())
             }
             Some("--iterations") => {
                 a.iterations = it
@@ -131,7 +137,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let benching = args.bench_startup || args.bench_open.is_some();
+    let benching = args.bench_startup || args.bench_open.is_some() || args.self_test.is_some();
     if args.help || benching {
         // Sous-système GUI : on se rattache à la console du parent pour y écrire.
         fx_win::process::attach_parent_console();
@@ -144,12 +150,31 @@ fn main() -> ExitCode {
     install_panic_hook();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "démarrage");
 
+    if let Some(dir) = &args.self_test {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("dossier d'auto-test {} : {e}", dir.display());
+            return ExitCode::FAILURE;
+        }
+        if std::fs::read_dir(dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(true)
+        {
+            eprintln!("le dossier d'auto-test doit être vide : {}", dir.display());
+            return ExitCode::FAILURE;
+        }
+    }
     let start = args
-        .path
+        .self_test
+        .clone()
+        .or(args.path)
         .or_else(|| fx_win::shell::known_folder(fx_win::shell::KnownFolder::Profile))
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));
-    let bench = if let Some(path) = args.bench_open {
+    // Chemin absolu et normalisé (barres obliques, `..`) : le Shell n'accepte que cette forme.
+    let start = std::path::absolute(&start).unwrap_or(start);
+    let bench = if args.self_test.is_some() {
+        Some(BenchMode::SelfTest { out: args.out })
+    } else if let Some(path) = args.bench_open {
         Some(BenchMode::Open {
             path,
             iterations: args.iterations,

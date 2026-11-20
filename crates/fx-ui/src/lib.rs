@@ -1,7 +1,8 @@
 //! Interface Slint de l'explorateur.
 //!
 //! Le thread d'interface ne fait que de l'affichage : le listing et le tri tournent dans
-//! `fx_core::loader`, les appels Shell sur un thread STA dédié. Les résultats reviennent par
+//! `fx_core::loader`, les appels Shell sur l'hôte Shell (thread STA) ou des threads
+//! d'opération. Les résultats reviennent par
 //! `slint::invoke_from_event_loop`.
 
 /// Code généré par Slint depuis `ui/app.slint`. Les lints du projet (unwrap, unsafe documenté)
@@ -18,8 +19,10 @@ mod generated {
 pub use generated::*;
 
 mod app;
+mod icons;
 mod model;
-mod shell_worker;
+mod nav;
+mod ops;
 mod window;
 
 use std::path::PathBuf;
@@ -50,9 +53,17 @@ pub enum UiError {
 
 /// Crée la fenêtre et exécute la boucle d'événements jusqu'à sa fermeture.
 pub fn run(options: Options) -> Result<(), UiError> {
+    // OLE sur le thread d'interface (glisser-déposer) avant la création de la fenêtre.
+    let _ole = fx_win::com::OleApartment::init().map_err(|e| UiError::Backend(format!("OLE : {e}")))?;
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name(options.renderer.clone())
+        // Le glisser-déposer intégré de winit enregistrerait sa propre cible : on le désactive
+        // pour enregistrer la nôtre (IDropTarget complet, voir fx_win::dragdrop).
+        .with_winit_window_attributes_hook(|attrs| {
+            use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_drag_and_drop(false)
+        })
         .select()
         .map_err(|e| UiError::Backend(e.to_string()))?;
     app::run(options)

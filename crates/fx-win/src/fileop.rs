@@ -19,7 +19,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{HRESULT, PCWSTR, Ref, implement};
 
-use crate::path::{display_form, wide_nul};
+use crate::path::{shell_path, wide_nul};
 use crate::pidl::Pidl;
 
 /// Opération demandée.
@@ -68,7 +68,7 @@ pub struct OpOutcome {
 }
 
 fn shell_item(path: &Path) -> windows::core::Result<IShellItem> {
-    let wide = wide_nul(display_form(path).as_os_str());
+    let wide = shell_path(path);
     // SAFETY: chaîne terminée par un nul vivante pendant l'appel.
     unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }
 }

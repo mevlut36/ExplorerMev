@@ -25,7 +25,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 use windows::core::PCWSTR;
 
-use crate::path::{display_form, wide_nul};
+use crate::path::shell_path;
 
 /// Image RGBA 8 bits, alpha non prémultiplié, lignes de haut en bas.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,7 +165,7 @@ pub fn type_icon(file_name: &[u16], is_dir: bool, size: u32) -> Option<IconImage
 
 /// Icône propre à l'élément `path` (lit le fichier pour `.exe`, `.ico`…).
 pub fn item_icon(path: &Path, size: u32) -> Option<IconImage> {
-    let wide = wide_nul(display_form(path).as_os_str());
+    let wide = shell_path(path);
     // SAFETY: chaîne terminée par un nul ; objets COM possédés ; le HBITMAP renvoyé nous
     // appartient et est supprimé après lecture.
     unsafe {

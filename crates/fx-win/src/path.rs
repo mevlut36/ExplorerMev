@@ -53,6 +53,16 @@ pub fn display_form(path: &Path) -> PathBuf {
     }
 }
 
+/// Chemin pour les API du Shell (`SHParseDisplayName`, `SHCreateItemFromParsingName`,
+/// `ShellExecuteExW`…), UTF-16 terminé par un nul : absolu et normalisé (`/` devient `\`, `.` et
+/// `..` résolus), sans préfixe `\\?\` que le Shell n'accepte pas partout. Le Shell refuse les
+/// barres obliques avec `E_INVALIDARG` (voir NOTES-WIN32.md).
+pub fn shell_path(path: &Path) -> Vec<u16> {
+    let shown = display_form(path);
+    let abs = std::path::absolute(&shown).unwrap_or(shown);
+    wide_nul(abs.as_os_str())
+}
+
 /// UTF-16 terminé par un nul, sans transformation.
 pub fn wide_nul(s: &std::ffi::OsStr) -> Vec<u16> {
     s.encode_wide().chain(std::iter::once(0)).collect()
@@ -88,6 +98,12 @@ mod tests {
     fn verbatim_is_kept() -> std::io::Result<()> {
         assert_eq!(s(&verbatim_wide(Path::new(r"\\?\C:\a\..\b"))?), r"\\?\C:\a\..\b");
         Ok(())
+    }
+
+    #[test]
+    fn shell_path_normalizes_slashes() {
+        assert_eq!(s(&shell_path(Path::new("C:/Users/./x/../y"))), r"C:\Users\y");
+        assert_eq!(s(&shell_path(Path::new(r"\\?\C:\a"))), r"C:\a");
     }
 
     #[test]

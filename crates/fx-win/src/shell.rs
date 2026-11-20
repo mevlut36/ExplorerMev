@@ -57,7 +57,7 @@ pub fn type_name(file_name: &[u16], is_dir: bool) -> Option<String> {
 ///
 /// `owner` : HWND de la fenêtre parente des éventuelles boîtes de dialogue du Shell.
 pub fn open(path: &Path, owner: Option<isize>) -> windows::core::Result<()> {
-    let file = wide_nul(path.as_os_str());
+    let file = crate::path::shell_path(path);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOASYNC,
@@ -108,4 +108,77 @@ pub fn known_folder(folder: KnownFolder) -> Option<PathBuf> {
 pub fn to_wide(s: &OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     s.encode_wide().collect()
+}
+
+/// Nature d'un lecteur.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriveKind {
+    Fixed,
+    Removable,
+    Network,
+    Optical,
+    Other,
+}
+
+/// Lecteurs présents (`C:\`, `D:\`…), sans accès disque.
+pub fn logical_drives() -> Vec<(PathBuf, DriveKind)> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    // SAFETY: appel sans pointeur.
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| {
+            let root = format!("{}:\\", (b'A' + i) as char);
+            let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+            // SAFETY: chaîne terminée par un nul ; GetDriveTypeW ne touche pas au support.
+            let t = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+            let kind = match t {
+                3 => DriveKind::Fixed,
+                2 => DriveKind::Removable,
+                4 => DriveKind::Network,
+                5 => DriveKind::Optical,
+                _ => DriveKind::Other,
+            };
+            (PathBuf::from(root), kind)
+        })
+        .collect()
+}
+
+/// Nom affiché par l'Explorateur (« Disque local (C:) », « Documents »…). Peut accéder au
+/// réseau pour un lecteur réseau : à appeler hors du thread d'interface, avec délai.
+pub fn display_name(path: &Path) -> Option<String> {
+    use windows::Win32::UI::Shell::SHGFI_DISPLAYNAME;
+    let wide = wide_nul(path.as_os_str());
+    let mut info = SHFILEINFOW::default();
+    // SAFETY: chaîne terminée par un nul ; structure locale de taille transmise.
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            Default::default(),
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_DISPLAYNAME,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let len = info.szDisplayName.iter().position(|&c| c == 0).unwrap_or(0);
+    (len > 0).then(|| String::from_utf16_lossy(&info.szDisplayName[..len]))
+}
+
+/// Position du curseur, en pixels écran.
+pub fn cursor_pos() -> (i32, i32) {
+    let mut p = windows::Win32::Foundation::POINT::default();
+    // SAFETY: point local.
+    let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) };
+    (p.x, p.y)
+}
+
+/// Convertit un point client (pixels physiques) de la fenêtre `hwnd` en coordonnées écran.
+pub fn client_to_screen(hwnd: isize, x: i32, y: i32) -> (i32, i32) {
+    let mut p = windows::Win32::Foundation::POINT { x, y };
+    // SAFETY: point local ; un HWND invalide fait simplement échouer l'appel.
+    let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(HWND(hwnd as *mut c_void), &mut p) };
+    (p.x, p.y)
 }

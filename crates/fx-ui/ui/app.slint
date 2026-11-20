@@ -1,6 +1,8 @@
-// Fenêtre principale de l'explorateur (phase 1 : vue détails et navigation).
+// Fenêtre principale de l'explorateur.
+// La logique (sélection, raccourcis, commandes) est en Rust : cette interface transmet les
+// événements bruts et affiche l'état.
 
-import { ListView, LineEdit, Palette } from "std-widgets.slint";
+import { ListView, LineEdit, ScrollView, Palette } from "std-widgets.slint";
 
 export struct Row {
     name: string,
@@ -9,11 +11,27 @@ export struct Row {
     size: string,
     is-dir: bool,
     dimmed: bool,
+    selected: bool,
+    focused: bool,
+    has-icon: bool,
+    icon: image,
+}
+
+export struct NavItem {
+    label: string,
+    glyph: string,
+    path: string,
+    header: bool,
+    current: bool,
+}
+
+export struct Crumb {
+    label: string,
+    path: string,
 }
 
 export global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
-    // Couleurs de « couche » Windows 11 posées sur le Mica.
     out property <brush> layer: dark ? #3a3a3a4c : #ffffff80;
     out property <brush> hover: dark ? #ffffff0f : #0000000a;
     out property <brush> pressed: dark ? #ffffff0a : #00000006;
@@ -22,6 +40,8 @@ export global Theme {
     out property <brush> divider: dark ? #ffffff15 : #0000000f;
     out property <brush> text-secondary: dark ? #ffffffc5 : #000000a0;
     out property <brush> text-disabled: dark ? #ffffff5d : #0000005c;
+    out property <brush> field: dark ? #ffffff0f : #ffffffb3;
+    out property <brush> popup: dark ? #2c2c2c : #f9f9f9;
     out property <brush> folder: #e8b84a;
     out property <length> row-height: 32px;
     out property <string> icons: "Segoe Fluent Icons";
@@ -78,7 +98,6 @@ component HeaderCell inherits Rectangle {
         horizontal-alignment: root.align-right ? right : left;
         overflow: elide;
     }
-    // Indicateur de tri, en haut au centre comme dans l'Explorateur.
     if root.sorted: Text {
         y: -1px;
         width: parent.width;
@@ -111,21 +130,45 @@ component HeaderCell inherits Rectangle {
 
 component FileRow inherits Rectangle {
     in property <Row> data;
-    in property <bool> selected;
+    in property <int> index;
+    in property <bool> list-has-focus;
+    in property <bool> drop-target;
+    in property <bool> renaming;
+    in property <string> rename-text;
+    in property <int> rename-stem;
     in property <length> w-name;
     in property <length> w-date;
     in property <length> w-type;
     in property <length> w-size;
-    callback clicked;
-    callback double-clicked;
+    // kind : 0 appui gauche, 1 relâchement gauche, 2 double-clic, 3 relâchement droit
+    callback pointer(kind: int, ctrl: bool, shift: bool, on-name: bool);
+    callback drag-moved(content-x: length, content-y: length, on-name: bool);
+    callback rename-commit(text: string);
+    callback rename-cancel();
     height: Theme.row-height;
     accessible-role: list-item;
     accessible-label: data.name;
-    accessible-item-selected: selected;
+    accessible-item-selected: data.selected;
+
+    property <bool> pressed-on-name;
 
     ta := TouchArea {
-        clicked => { root.clicked(); }
-        double-clicked => { root.double-clicked(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.pressed-on-name = self.mouse-x < root.w-name;
+                root.pointer(0, e.modifiers.control, e.modifiers.shift, root.pressed-on-name);
+            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                root.pointer(1, e.modifiers.control, e.modifiers.shift, root.pressed-on-name);
+            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                root.pointer(3, e.modifiers.control, e.modifiers.shift, true);
+            }
+        }
+        double-clicked => { root.pointer(2, false, false, true); }
+        moved => {
+            if self.pressed {
+                root.drag-moved(self.mouse-x, root.index * Theme.row-height + self.mouse-y, root.pressed-on-name);
+            }
+        }
     }
     Rectangle {
         x: 4px;
@@ -133,9 +176,13 @@ component FileRow inherits Rectangle {
         y: 1px;
         height: parent.height - 2px;
         border-radius: 4px;
-        background: root.selected ? (ta.has-hover ? Theme.selected-hover : Theme.selected) : ta.has-hover ? Theme.hover : transparent;
+        background: root.drop-target ? Palette.accent-background.transparentize(0.6)
+            : root.data.selected ? (ta.has-hover ? Theme.selected-hover : Theme.selected)
+            : ta.has-hover ? Theme.hover : transparent;
+        border-width: root.data.focused && root.list-has-focus ? 1px : 0px;
+        border-color: Theme.text-disabled;
     }
-    if root.selected: Rectangle {
+    if root.data.selected: Rectangle {
         x: 4px;
         width: 3px;
         height: 16px;
@@ -144,7 +191,14 @@ component FileRow inherits Rectangle {
     }
     Rectangle {
         opacity: root.data.dimmed ? 0.55 : 1.0;
-        Text {
+        if root.data.has-icon: Image {
+            x: 14px;
+            width: 16px;
+            height: 16px;
+            source: root.data.icon;
+            image-fit: contain;
+        }
+        if !root.data.has-icon: Text {
             x: 14px;
             width: 20px;
             text: root.data.is-dir ? "\u{E8B7}" : "\u{E8A5}";
@@ -153,13 +207,44 @@ component FileRow inherits Rectangle {
             color: root.data.is-dir ? Theme.folder : Theme.text-secondary;
             vertical-alignment: center;
         }
-        Text {
-            x: 42px;
-            width: root.w-name - 46px;
+        if !root.renaming: Text {
+            x: 40px;
+            width: root.w-name - 44px;
             text: root.data.name;
             font-size: 12px;
             vertical-alignment: center;
             overflow: elide;
+        }
+    }
+    if root.renaming: edit := LineEdit {
+        x: 36px;
+        y: 2px;
+        width: root.w-name - 36px;
+        height: parent.height - 4px;
+        font-size: 12px;
+        text: root.rename-text;
+        property <bool> done;
+        init => {
+            self.focus();
+            self.set-selection-offsets(0, root.rename-stem);
+        }
+        accepted(t) => {
+            self.done = true;
+            root.rename-commit(t);
+        }
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                self.done = true;
+                root.rename-cancel();
+                return accept;
+            }
+            reject
+        }
+        changed has-focus => {
+            if !self.has-focus && !self.done {
+                self.done = true;
+                root.rename-commit(self.text);
+            }
         }
     }
     Text {
@@ -192,57 +277,122 @@ component FileRow inherits Rectangle {
     }
 }
 
+component NavPane inherits Rectangle {
+    in property <[NavItem]> items;
+    callback activated(path: string);
+    width: 220px;
+    ScrollView {
+        VerticalLayout {
+            padding: 8px;
+            spacing: 2px;
+            alignment: start;
+            for item in root.items: Rectangle {
+                height: item.header ? 28px : 32px;
+                border-radius: 4px;
+                background: item.header ? transparent : item.current ? Theme.selected : nta.has-hover ? Theme.hover : transparent;
+                accessible-role: button;
+                accessible-label: item.label;
+                nta := TouchArea {
+                    enabled: !item.header;
+                    clicked => { root.activated(item.path); }
+                }
+                if item.current: Rectangle {
+                    x: 0px;
+                    width: 3px;
+                    height: 16px;
+                    border-radius: 1.5px;
+                    background: Palette.accent-background;
+                }
+                if !item.header: Text {
+                    x: 12px;
+                    text: item.glyph;
+                    font-family: Theme.icons;
+                    font-size: 16px;
+                    color: item.glyph == "\u{E8B7}" ? Theme.folder : Palette.foreground;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: item.header ? 8px : 40px;
+                    width: parent.width - self.x - 8px;
+                    text: item.label;
+                    font-size: 12px;
+                    font-weight: item.header ? 600 : 400;
+                    color: item.header ? Theme.text-secondary : Palette.foreground;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: root.folder-title == "" ? "WinDir" : root.folder-title + " — WinDir";
-    preferred-width: 1100px;
-    preferred-height: 720px;
-    min-width: 480px;
-    min-height: 320px;
+    preferred-width: 1200px;
+    preferred-height: 760px;
+    min-width: 560px;
+    min-height: 360px;
     default-font-family: "Segoe UI Variable Text";
     in property <bool> mica: true;
     background: mica ? transparent : Palette.background;
 
     // --- État fourni par Rust ---
     in property <[Row]> rows;
+    in property <[NavItem]> nav-items;
+    in property <[Crumb]> crumbs;
+    in property <[string]> suggestions;
+    in-out property <int> suggestion-index: -1;
     in property <string> folder-title;
     in-out property <string> address;
+    in-out property <bool> address-editing;
     in property <string> status;
     in property <string> error-text;
     in property <bool> loading;
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <bool> can-up;
-    in property <int> sort-column; // 0 nom, 1 date, 2 type, 3 taille
+    in property <int> sort-column;
     in property <bool> sort-descending;
-    in-out property <int> selected: -1;
     in-out property <string> filter-text;
+    in property <int> rename-row: -1;
+    in property <string> rename-text;
+    in property <int> rename-stem;
+    in property <int> drop-row: -1;
+    out property <int> page-rows: max(1, floor(file-list.visible-height / Theme.row-height) - 1);
+
+    // Rectangle de sélection, en coordonnées du contenu de la liste.
+    in-out property <bool> marquee-active;
+    in-out property <length> mq-x0;
+    in-out property <length> mq-y0;
+    in-out property <length> mq-x1;
+    in-out property <length> mq-y1;
 
     // --- Actions vers Rust ---
     callback navigate-to(string);
+    callback address-edited(string);
     callback go-back();
     callback go-forward();
     callback go-up();
     callback refresh();
-    callback open-row(int);
+    callback nav-activated(string);
+    callback crumb-activated(string);
     callback sort-by(int);
     callback filter-edited(string);
-    callback selection-changed(int);
+    callback row-pointer(row: int, kind: int, ctrl: bool, shift: bool, on-name: bool);
+    callback background-pointer(kind: int, ctrl: bool, shift: bool);
+    callback drag-out(row: int);
+    callback marquee-changed(row-a: int, row-b: int, ctrl: bool);
+    callback marquee-ended();
+    callback rename-commit(string);
+    callback rename-cancel();
+    callback key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
 
     in-out property <length> w-name: 340px;
     in-out property <length> w-date: 160px;
     in-out property <length> w-type: 170px;
     in-out property <length> w-size: 100px;
 
-    // Sélection depuis Rust (ex. retour au parent) : fait défiler pour la rendre visible.
-    public function select-row(row: int) {
-        root.selected = row;
-        root.scroll-to-row(row);
-    }
-    public function focus-list() {
-        list-focus.focus();
-    }
-
-    function scroll-to-row(row: int) {
+    public function scroll-to-row(row: int) {
         if row < 0 {
             return;
         }
@@ -253,44 +403,64 @@ export component MainWindow inherits Window {
         }
     }
 
-    function move-selection(row: int) {
-        if root.rows.length == 0 {
-            return;
-        }
-        root.selected = max(0, min(root.rows.length - 1, row));
-        root.scroll-to-row(root.selected);
-        root.selection-changed(root.selected);
+    // Ancrage d'un menu ouvert au clavier : coin de la ligne `row` (pixels logiques).
+    public function row-anchor-x() -> length {
+        list-area.absolute-position.x + 48px
+    }
+    public function row-anchor-y(row: int) -> length {
+        list-area.absolute-position.y + file-list.content-y + (row + 1) * Theme.row-height
     }
 
-    property <int> page-rows: max(1, floor(file-list.visible-height / Theme.row-height) - 1);
+    public function focus-list() {
+        list-focus.focus();
+    }
 
-    // Raccourcis globaux (les événements non consommés par un champ de saisie remontent ici).
+    // Ligne sous un point de la fenêtre (pixels logiques), -1 si hors des lignes.
+    public function row-at(x: length, y: length) -> int {
+        if x < list-area.absolute-position.x || x > list-area.absolute-position.x + list-area.width {
+            return -1;
+        }
+        if y < list-area.absolute-position.y || y > list-area.absolute-position.y + list-area.height {
+            return -1;
+        }
+        let r = floor((y - list-area.absolute-position.y - file-list.content-y) / Theme.row-height);
+        return r < root.rows.length ? r : -1;
+    }
+
+    function start-address-edit() {
+        root.address-editing = true;
+        address-edit.focus();
+        address-edit.select-all();
+    }
+
+    function marquee-update(cx: length, cy: length, ctrl: bool) {
+        root.mq-x1 = cx;
+        root.mq-y1 = cy;
+        if !root.marquee-active && (abs(root.mq-x1 - root.mq-x0) > 4px || abs(root.mq-y1 - root.mq-y0) > 4px) {
+            root.marquee-active = true;
+        }
+        if root.marquee-active {
+            root.marquee-changed(
+                floor(min(root.mq-y0, root.mq-y1) / Theme.row-height),
+                floor(max(root.mq-y0, root.mq-y1) / Theme.row-height),
+                ctrl);
+        }
+    }
+
+    property <bool> drag-started;
+
     global-keys := FocusScope {
         key-pressed(event) => {
-            if event.modifiers.alt && event.text == Key.LeftArrow {
-                root.go-back();
-                return accept;
-            }
-            if event.modifiers.alt && event.text == Key.RightArrow {
-                root.go-forward();
-                return accept;
-            }
-            if event.modifiers.alt && event.text == Key.UpArrow {
-                root.go-up();
-                return accept;
-            }
-            if event.text == Key.F5 {
-                root.refresh();
-                return accept;
-            }
             if (event.modifiers.control && event.text == "l") || (event.modifiers.alt && event.text == "d") || event.text == Key.F4 {
-                address-edit.focus();
-                address-edit.select-all();
+                root.start-address-edit();
                 return accept;
             }
             if event.modifiers.control && (event.text == "f" || event.text == "e") {
                 filter-edit.focus();
                 filter-edit.select-all();
+                return accept;
+            }
+            if root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt) {
                 return accept;
             }
             reject
@@ -326,14 +496,91 @@ export component MainWindow inherits Window {
                     tooltip: "Actualiser (F5)";
                     clicked => { root.refresh(); }
                 }
-                address-edit := LineEdit {
+                address-box := Rectangle {
                     horizontal-stretch: 1;
-                    text <=> root.address;
-                    font-size: 12px;
-                    accessible-label: "Adresse";
-                    accepted(text) => {
-                        root.navigate-to(text);
-                        list-focus.focus();
+                    border-radius: 4px;
+                    clip: true;
+                    background: Theme.field;
+                    // Fil d'Ariane : un clic sur un segment navigue, un clic ailleurs édite.
+                    if !root.address-editing: TouchArea {
+                        clicked => { root.start-address-edit(); }
+                    }
+                    // Chemin trop long : on montre la fin, comme l'Explorateur.
+                    if !root.address-editing: HorizontalLayout {
+                        width: self.preferred-width;
+                        x: min(0px, address-box.width - self.preferred-width - 6px);
+                        padding-left: 6px;
+                        alignment: start;
+                        for crumb[i] in root.crumbs: HorizontalLayout {
+                            if i > 0: Text {
+                                text: "\u{E76C}";
+                                font-family: Theme.icons;
+                                font-size: 8px;
+                                color: Theme.text-secondary;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                border-radius: 4px;
+                                background: cta.has-hover ? Theme.hover : transparent;
+                                accessible-role: button;
+                                accessible-label: crumb.label;
+                                cta := TouchArea {
+                                    clicked => { root.crumb-activated(crumb.path); }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    Text {
+                                        text: crumb.label;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    address-edit := LineEdit {
+                        visible: root.address-editing;
+                        text <=> root.address;
+                        font-size: 12px;
+                        accessible-label: "Adresse";
+                        edited(t) => {
+                            root.suggestion-index = -1;
+                            root.address-edited(t);
+                        }
+                        accepted(t) => {
+                            root.address-editing = false;
+                            root.navigate-to(root.suggestion-index >= 0 && root.suggestion-index < root.suggestions.length
+                                ? root.suggestions[root.suggestion-index] : t);
+                            list-focus.focus();
+                        }
+                        key-pressed(e) => {
+                            if e.text == Key.Escape {
+                                root.address-editing = false;
+                                list-focus.focus();
+                                return accept;
+                            }
+                            if e.text == Key.DownArrow && root.suggestions.length > 0 {
+                                root.suggestion-index = min(root.suggestions.length - 1, root.suggestion-index + 1);
+                                return accept;
+                            }
+                            if e.text == Key.UpArrow && root.suggestions.length > 0 {
+                                root.suggestion-index = max(-1, root.suggestion-index - 1);
+                                return accept;
+                            }
+                            if e.text == Key.Tab && root.suggestions.length > 0 {
+                                root.address = root.suggestions[max(0, root.suggestion-index)] + "\\";
+                                root.suggestion-index = -1;
+                                root.address-edited(root.address);
+                                return accept;
+                            }
+                            reject
+                        }
+                        changed has-focus => {
+                            if !self.has-focus {
+                                root.address-editing = false;
+                            }
+                        }
                     }
                 }
                 filter-edit := LineEdit {
@@ -352,131 +599,164 @@ export component MainWindow inherits Window {
                         }
                         if event.text == Key.DownArrow {
                             list-focus.focus();
-                            root.move-selection(0);
-                            return accept;
+                            return reject;
                         }
                         reject
                     }
                 }
             }
 
-            // --- Contenu ---
-            Rectangle {
-                background: Theme.layer;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                VerticalLayout {
-                    padding-top: 4px;
-                    Rectangle {
-                        height: 32px;
-                        HorizontalLayout {
-                            padding-left: 4px;
-                            alignment: start;
-                            HeaderCell {
-                                text: "Nom";
-                                col-width <=> root.w-name;
-                                sorted: root.sort-column == 0;
-                                descending: root.sort-descending;
-                                clicked => { root.sort-by(0); }
-                            }
-                            HeaderCell {
-                                text: "Modifié le";
-                                col-width <=> root.w-date;
-                                sorted: root.sort-column == 1;
-                                descending: root.sort-descending;
-                                clicked => { root.sort-by(1); }
-                            }
-                            HeaderCell {
-                                text: "Type";
-                                col-width <=> root.w-type;
-                                sorted: root.sort-column == 2;
-                                descending: root.sort-descending;
-                                clicked => { root.sort-by(2); }
-                            }
-                            HeaderCell {
-                                text: "Taille";
-                                align-right: true;
-                                col-width <=> root.w-size;
-                                sorted: root.sort-column == 3;
-                                descending: root.sort-descending;
-                                clicked => { root.sort-by(3); }
-                            }
-                        }
-                    }
-                    list-focus := FocusScope {
-                        accessible-role: list;
-                        accessible-label: "Contenu du dossier";
-                        key-pressed(event) => {
-                            if event.modifiers.alt || event.modifiers.control {
-                                return reject;
-                            }
-                            if event.text == Key.DownArrow {
-                                root.move-selection(root.selected + 1);
-                                return accept;
-                            }
-                            if event.text == Key.UpArrow {
-                                root.move-selection(root.selected - 1);
-                                return accept;
-                            }
-                            if event.text == Key.PageDown {
-                                root.move-selection(root.selected + root.page-rows);
-                                return accept;
-                            }
-                            if event.text == Key.PageUp {
-                                root.move-selection(root.selected - root.page-rows);
-                                return accept;
-                            }
-                            if event.text == Key.Home {
-                                root.move-selection(0);
-                                return accept;
-                            }
-                            if event.text == Key.End {
-                                root.move-selection(root.rows.length - 1);
-                                return accept;
-                            }
-                            if event.text == Key.Return && root.selected >= 0 {
-                                root.open-row(root.selected);
-                                return accept;
-                            }
-                            if event.text == Key.Backspace {
-                                root.go-up();
-                                return accept;
-                            }
-                            reject
-                        }
-                        file-list := ListView {
-                            for row[i] in root.rows: FileRow {
-                                data: row;
-                                selected: i == root.selected;
-                                w-name: root.w-name;
-                                w-date: root.w-date;
-                                w-type: root.w-type;
-                                w-size: root.w-size;
-                                clicked => {
-                                    list-focus.focus();
-                                    root.selected = i;
-                                    root.selection-changed(i);
+            HorizontalLayout {
+                NavPane {
+                    items: root.nav-items;
+                    activated(path) => { root.nav-activated(path); }
+                }
+                // --- Contenu ---
+                Rectangle {
+                    background: Theme.layer;
+                    border-top-left-radius: 8px;
+                    VerticalLayout {
+                        padding-top: 4px;
+                        Rectangle {
+                            height: 32px;
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                alignment: start;
+                                HeaderCell {
+                                    text: "Nom";
+                                    col-width <=> root.w-name;
+                                    sorted: root.sort-column == 0;
+                                    descending: root.sort-descending;
+                                    clicked => { root.sort-by(0); }
                                 }
-                                double-clicked => { root.open-row(i); }
+                                HeaderCell {
+                                    text: "Modifié le";
+                                    col-width <=> root.w-date;
+                                    sorted: root.sort-column == 1;
+                                    descending: root.sort-descending;
+                                    clicked => { root.sort-by(1); }
+                                }
+                                HeaderCell {
+                                    text: "Type";
+                                    col-width <=> root.w-type;
+                                    sorted: root.sort-column == 2;
+                                    descending: root.sort-descending;
+                                    clicked => { root.sort-by(2); }
+                                }
+                                HeaderCell {
+                                    text: "Taille";
+                                    align-right: true;
+                                    col-width <=> root.w-size;
+                                    sorted: root.sort-column == 3;
+                                    descending: root.sort-descending;
+                                    clicked => { root.sort-by(3); }
+                                }
                             }
                         }
-                        if root.error-text != "": Rectangle {
-                            Text {
-                                x: 24px;
-                                y: 24px;
-                                width: parent.width - 48px;
-                                text: root.error-text;
-                                wrap: word-wrap;
-                                font-size: 14px;
-                                color: Theme.text-secondary;
+                        list-area := Rectangle {
+                            list-focus := FocusScope {
+                                accessible-role: list;
+                                accessible-label: "Contenu du dossier";
+                                key-pressed(event) => {
+                                    if root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt) {
+                                        return accept;
+                                    }
+                                    reject
+                                }
+                                // Zone vide sous les lignes : désélection, menu de fond, rectangle.
+                                TouchArea {
+                                    pointer-event(e) => {
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                            list-focus.focus();
+                                            root.mq-x0 = self.mouse-x;
+                                            root.mq-y0 = self.mouse-y - file-list.content-y;
+                                            root.marquee-active = false;
+                                            root.background-pointer(0, e.modifiers.control, e.modifiers.shift);
+                                        } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                                            if root.marquee-active {
+                                                root.marquee-active = false;
+                                                root.marquee-ended();
+                                            }
+                                        } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                                            root.background-pointer(3, e.modifiers.control, e.modifiers.shift);
+                                        }
+                                    }
+                                    moved => {
+                                        if self.pressed {
+                                            root.marquee-update(self.mouse-x, self.mouse-y - file-list.content-y, false);
+                                        }
+                                    }
+                                }
+                                file-list := ListView {
+                                    for row[i] in root.rows: FileRow {
+                                        data: row;
+                                        index: i;
+                                        list-has-focus: list-focus.has-focus;
+                                        drop-target: i == root.drop-row;
+                                        renaming: i == root.rename-row;
+                                        rename-text: root.rename-text;
+                                        rename-stem: root.rename-stem;
+                                        w-name: root.w-name;
+                                        w-date: root.w-date;
+                                        w-type: root.w-type;
+                                        w-size: root.w-size;
+                                        pointer(kind, ctrl, shift, on-name) => {
+                                            if kind == 0 {
+                                                list-focus.focus();
+                                                root.drag-started = false;
+                                                root.mq-x0 = 0px;
+                                                root.mq-y0 = i * Theme.row-height;
+                                                root.marquee-active = false;
+                                            }
+                                            if kind == 1 && root.marquee-active {
+                                                root.marquee-active = false;
+                                                root.marquee-ended();
+                                                return;
+                                            }
+                                            root.row-pointer(i, kind, ctrl, shift, on-name);
+                                        }
+                                        drag-moved(cx, cy, on-name) => {
+                                            if on-name {
+                                                if !root.drag-started && abs(cy - root.mq-y0) > 6px {
+                                                    root.drag-started = true;
+                                                    root.drag-out(i);
+                                                }
+                                            } else {
+                                                root.marquee-update(cx, cy, false);
+                                            }
+                                        }
+                                        rename-commit(t) => { root.rename-commit(t); }
+                                        rename-cancel => { root.rename-cancel(); }
+                                    }
+                                }
+                                if root.marquee-active: Rectangle {
+                                    x: min(root.mq-x0, root.mq-x1);
+                                    y: min(root.mq-y0, root.mq-y1) + file-list.content-y;
+                                    width: abs(root.mq-x1 - root.mq-x0);
+                                    height: abs(root.mq-y1 - root.mq-y0);
+                                    background: Palette.accent-background.transparentize(0.75);
+                                    border-width: 1px;
+                                    border-color: Palette.accent-background;
+                                }
+                                if root.error-text != "": Rectangle {
+                                    Text {
+                                        x: 24px;
+                                        y: 24px;
+                                        width: parent.width - 48px;
+                                        text: root.error-text;
+                                        wrap: word-wrap;
+                                        font-size: 14px;
+                                        color: Theme.text-secondary;
+                                    }
+                                }
+                                if root.error-text == "" && !root.loading && root.rows.length == 0: Text {
+                                    y: 24px;
+                                    text: root.filter-text == "" ? "Ce dossier est vide." : "Aucun élément ne correspond au filtre.";
+                                    font-size: 12px;
+                                    color: Theme.text-secondary;
+                                    horizontal-alignment: center;
+                                }
                             }
-                        }
-                        if root.error-text == "" && !root.loading && root.rows.length == 0: Text {
-                            y: 24px;
-                            text: root.filter-text == "" ? "Ce dossier est vide." : "Aucun élément ne correspond au filtre.";
-                            font-size: 12px;
-                            color: Theme.text-secondary;
-                            horizontal-alignment: center;
                         }
                     }
                 }
@@ -492,6 +772,42 @@ export component MainWindow inherits Window {
                     font-size: 12px;
                     color: Theme.text-secondary;
                     vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Suggestions d'autocomplétion de l'adresse, au-dessus du contenu.
+    if root.address-editing && root.suggestions.length > 0: Rectangle {
+        x: address-box.absolute-position.x - root.absolute-position.x;
+        y: address-box.absolute-position.y - root.absolute-position.y + address-box.height + 2px;
+        width: address-box.width;
+        height: min(root.suggestions.length, 10) * 28px + 8px;
+        background: Theme.popup;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.divider;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000040;
+        VerticalLayout {
+            padding: 4px;
+            for s[i] in root.suggestions: Rectangle {
+                height: 28px;
+                border-radius: 4px;
+                background: i == root.suggestion-index ? Theme.selected : sta.has-hover ? Theme.hover : transparent;
+                sta := TouchArea {
+                    clicked => {
+                        root.address-editing = false;
+                        root.navigate-to(s);
+                        list-focus.focus();
+                    }
+                }
+                Text {
+                    x: 10px;
+                    text: s;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
             }
         }
