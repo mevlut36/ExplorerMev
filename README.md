@@ -82,7 +82,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run --release -p fx-bench --bin gen-fixtures   # une fois
 cargo bench -p fx-bench
-targetelease\windir.exe --self-test "$env:TEMP\windir-selftest"   # scénario fonctionnel, dossier vide
+target\release\windir.exe --self-test "$env:TEMP\windir-selftest"   # scénario fonctionnel, dossier vide
 ```
 
 Journal : `%LOCALAPPDATA%\WinDir\logs`, niveau réglé par la variable `WINDIR_LOG`
