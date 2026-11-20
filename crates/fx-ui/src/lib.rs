@@ -24,6 +24,7 @@ mod icons;
 mod model;
 mod nav;
 mod ops;
+mod pane;
 mod window;
 
 use std::path::PathBuf;
@@ -45,6 +46,10 @@ pub struct Options {
     pub network_timeout: std::time::Duration,
     /// Avertissement à afficher au démarrage (configuration illisible…).
     pub startup_warning: Option<String>,
+    /// Restaurer (et enregistrer) les onglets de la session précédente.
+    pub restore_session: bool,
+    /// Dossier des données de l'application (session, favoris) : `%APPDATA%\WinDir`.
+    pub data_dir: Option<PathBuf>,
     pub bench: Option<BenchMode>,
     /// Instant de début de `main`, pour l'instrumentation du démarrage.
     pub main_start: Instant,

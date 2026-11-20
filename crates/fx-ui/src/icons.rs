@@ -102,11 +102,6 @@ impl IconLoader {
         let _ = self.tx.send(req);
     }
 
-    /// Change de dossier : les requêtes d'icônes d'éléments en attente deviennent inutiles.
-    pub fn next_generation(&self) -> u64 {
-        self.generation.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }

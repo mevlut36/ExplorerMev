@@ -343,58 +343,38 @@ component NavPane inherits Rectangle {
     }
 }
 
-export component MainWindow inherits Window {
-    title: root.folder-title == "" ? "WinDir" : root.folder-title + " — WinDir";
-    preferred-width: 1200px;
-    preferred-height: 760px;
-    min-width: 560px;
-    min-height: 360px;
-    default-font-family: "Segoe UI Variable Text";
-    in property <bool> mica: true;
-    background: mica ? transparent : Palette.background;
+export struct TabItem {
+    title: string,
+    active: bool,
+}
 
-    // --- État fourni par Rust ---
+export struct PaletteItem {
+    label: string,
+    hint: string,
+}
+
+// Volet de dossier : en-tête, liste virtualisée, rectangle de sélection, barre d'état.
+// Instancié deux fois (double volet) ; tous les événements remontent avec l'index du volet.
+component FolderPane inherits Rectangle {
     in property <[Row]> rows;
-    in property <[NavItem]> nav-items;
-    in property <[Crumb]> crumbs;
-    in property <[string]> suggestions;
-    in-out property <int> suggestion-index: -1;
-    in property <string> folder-title;
-    in-out property <string> address;
-    in-out property <bool> address-editing;
+    in property <bool> active;
+    in property <bool> show-active;
     in property <string> status;
     in property <string> error-text;
     in property <bool> loading;
-    in property <bool> can-back;
-    in property <bool> can-forward;
-    in property <bool> can-up;
+    in property <bool> filtering;
     in property <int> sort-column;
     in property <bool> sort-descending;
-    in-out property <string> filter-text;
     in property <int> rename-row: -1;
     in property <string> rename-text;
     in property <int> rename-stem;
     in property <int> drop-row: -1;
     out property <int> page-rows: max(1, floor(file-list.visible-height / Theme.row-height) - 1);
+    out property <length> max-scroll: max(0px, file-list.content-height - file-list.visible-height);
+    out property <length> scroll-y: -file-list.content-y;
 
-    // Rectangle de sélection, en coordonnées du contenu de la liste.
-    in-out property <bool> marquee-active;
-    in-out property <length> mq-x0;
-    in-out property <length> mq-y0;
-    in-out property <length> mq-x1;
-    in-out property <length> mq-y1;
-
-    // --- Actions vers Rust ---
-    callback navigate-to(string);
-    callback address-edited(string);
-    callback go-back();
-    callback go-forward();
-    callback go-up();
-    callback refresh();
-    callback nav-activated(string);
-    callback crumb-activated(string);
+    callback activated();
     callback sort-by(int);
-    callback filter-edited(string);
     callback row-pointer(row: int, kind: int, ctrl: bool, shift: bool, on-name: bool);
     callback background-pointer(kind: int, ctrl: bool, shift: bool);
     callback drag-out(row: int);
@@ -410,6 +390,22 @@ export component MainWindow inherits Window {
     in-out property <length> w-type: 170px;
     in-out property <length> w-size: 100px;
 
+    property <bool> marquee-active;
+    property <length> mq-x0;
+    property <length> mq-y0;
+    property <length> mq-x1;
+    property <length> mq-y1;
+    property <bool> drag-started;
+
+    background: Theme.layer;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    // Largeur préférée faible : en double volet, l'espace est partagé à égalité (sinon la somme
+    // des colonnes imposerait sa largeur au premier volet). Le contenu qui dépasse est découpé.
+    preferred-width: 200px;
+    min-width: 160px;
+    clip: true;
+
     public function scroll-to-row(row: int) {
         if row < 0 {
             return;
@@ -420,8 +416,24 @@ export component MainWindow inherits Window {
             file-list.content-y = -((row + 1) * Theme.row-height - file-list.visible-height);
         }
     }
-
-    // Ancrage d'un menu ouvert au clavier : coin de la ligne `row` (pixels logiques).
+    public function set-scroll(y: length) {
+        file-list.content-y = -y;
+    }
+    public function focus-list() {
+        list-focus.focus();
+    }
+    public function contains(x: length, y: length) -> bool {
+        x >= list-area.absolute-position.x && x <= list-area.absolute-position.x + list-area.width
+            && y >= list-area.absolute-position.y && y <= list-area.absolute-position.y + list-area.height
+    }
+    // Ligne sous un point de la fenêtre (pixels logiques), -1 si hors des lignes.
+    public function row-at(x: length, y: length) -> int {
+        if !root.contains(x, y) {
+            return -1;
+        }
+        let r = floor((y - list-area.absolute-position.y - file-list.content-y) / Theme.row-height);
+        return r < root.rows.length ? r : -1;
+    }
     public function row-anchor-x() -> length {
         list-area.absolute-position.x + 48px
     }
@@ -429,35 +441,7 @@ export component MainWindow inherits Window {
         list-area.absolute-position.y + file-list.content-y + (row + 1) * Theme.row-height
     }
 
-    // Mesure du défilement : position (px depuis le haut) et défilement maximal.
-    public function set-scroll(y: length) {
-        file-list.content-y = -y;
-    }
-    out property <length> max-scroll: max(0px, file-list.content-height - file-list.visible-height);
-
-    public function focus-list() {
-        list-focus.focus();
-    }
-
-    // Ligne sous un point de la fenêtre (pixels logiques), -1 si hors des lignes.
-    public function row-at(x: length, y: length) -> int {
-        if x < list-area.absolute-position.x || x > list-area.absolute-position.x + list-area.width {
-            return -1;
-        }
-        if y < list-area.absolute-position.y || y > list-area.absolute-position.y + list-area.height {
-            return -1;
-        }
-        let r = floor((y - list-area.absolute-position.y - file-list.content-y) / Theme.row-height);
-        return r < root.rows.length ? r : -1;
-    }
-
-    function start-address-edit() {
-        root.address-editing = true;
-        address-edit.focus();
-        address-edit.select-all();
-    }
-
-    function marquee-update(cx: length, cy: length, ctrl: bool) {
+    function marquee-update(cx: length, cy: length) {
         root.mq-x1 = cx;
         root.mq-y1 = cy;
         if !root.marquee-active && (abs(root.mq-x1 - root.mq-x0) > 4px || abs(root.mq-y1 - root.mq-y0) > 4px) {
@@ -467,11 +451,405 @@ export component MainWindow inherits Window {
             root.marquee-changed(
                 floor(min(root.mq-y0, root.mq-y1) / Theme.row-height),
                 floor(max(root.mq-y0, root.mq-y1) / Theme.row-height),
-                ctrl);
+                false);
         }
     }
 
-    property <bool> drag-started;
+    // Volet actif en double volet : liseré d'accent.
+    if root.show-active: Rectangle {
+        y: 0px;
+        height: 2px;
+        x: 8px;
+        width: parent.width - 16px;
+        background: Palette.accent-background;
+        border-radius: 1px;
+    }
+
+    VerticalLayout {
+        padding-top: 4px;
+        Rectangle {
+            height: 32px;
+            HorizontalLayout {
+                padding-left: 4px;
+                alignment: start;
+                HeaderCell {
+                    text: "Nom";
+                    col-width <=> root.w-name;
+                    sorted: root.sort-column == 0;
+                    descending: root.sort-descending;
+                    clicked => { root.activated(); root.sort-by(0); }
+                }
+                HeaderCell {
+                    text: "État";
+                    col-width <=> root.w-state;
+                }
+                HeaderCell {
+                    text: "Modifié le";
+                    col-width <=> root.w-date;
+                    sorted: root.sort-column == 1;
+                    descending: root.sort-descending;
+                    clicked => { root.activated(); root.sort-by(1); }
+                }
+                HeaderCell {
+                    text: "Type";
+                    col-width <=> root.w-type;
+                    sorted: root.sort-column == 2;
+                    descending: root.sort-descending;
+                    clicked => { root.activated(); root.sort-by(2); }
+                }
+                HeaderCell {
+                    text: "Taille";
+                    align-right: true;
+                    col-width <=> root.w-size;
+                    sorted: root.sort-column == 3;
+                    descending: root.sort-descending;
+                    clicked => { root.activated(); root.sort-by(3); }
+                }
+            }
+        }
+        list-area := Rectangle {
+            list-focus := FocusScope {
+                accessible-role: list;
+                accessible-label: "Contenu du dossier";
+                key-pressed(event) => {
+                    if root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt) {
+                        return accept;
+                    }
+                    reject
+                }
+                changed has-focus => {
+                    if self.has-focus {
+                        root.activated();
+                    }
+                }
+                // Zone vide sous les lignes : désélection, menu de fond, rectangle.
+                TouchArea {
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                            list-focus.focus();
+                            root.activated();
+                            root.mq-x0 = self.mouse-x;
+                            root.mq-y0 = self.mouse-y - file-list.content-y;
+                            root.marquee-active = false;
+                            root.background-pointer(0, e.modifiers.control, e.modifiers.shift);
+                        } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                            if root.marquee-active {
+                                root.marquee-active = false;
+                                root.marquee-ended();
+                            }
+                        } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                            root.activated();
+                            root.background-pointer(3, e.modifiers.control, e.modifiers.shift);
+                        }
+                    }
+                    moved => {
+                        if self.pressed {
+                            root.marquee-update(self.mouse-x, self.mouse-y - file-list.content-y);
+                        }
+                    }
+                }
+                file-list := ListView {
+                    for row[i] in root.rows: FileRow {
+                        data: row;
+                        index: i;
+                        list-has-focus: list-focus.has-focus;
+                        drop-target: i == root.drop-row;
+                        renaming: i == root.rename-row;
+                        rename-text: root.rename-text;
+                        rename-stem: root.rename-stem;
+                        w-name: root.w-name;
+                        w-state: root.w-state;
+                        w-date: root.w-date;
+                        w-type: root.w-type;
+                        w-size: root.w-size;
+                        pointer(kind, ctrl, shift, on-name) => {
+                            if kind == 0 {
+                                list-focus.focus();
+                                root.activated();
+                                root.drag-started = false;
+                                root.mq-x0 = 0px;
+                                root.mq-y0 = i * Theme.row-height;
+                                root.marquee-active = false;
+                            }
+                            if kind == 3 {
+                                root.activated();
+                            }
+                            if kind == 1 && root.marquee-active {
+                                root.marquee-active = false;
+                                root.marquee-ended();
+                                return;
+                            }
+                            root.row-pointer(i, kind, ctrl, shift, on-name);
+                        }
+                        drag-moved(cx, cy, on-name) => {
+                            if on-name {
+                                if !root.drag-started && abs(cy - root.mq-y0) > 6px {
+                                    root.drag-started = true;
+                                    root.drag-out(i);
+                                }
+                            } else {
+                                root.marquee-update(cx, cy);
+                            }
+                        }
+                        rename-commit(t) => { root.rename-commit(t); }
+                        rename-cancel => { root.rename-cancel(); }
+                    }
+                }
+                if root.marquee-active: Rectangle {
+                    x: min(root.mq-x0, root.mq-x1);
+                    y: min(root.mq-y0, root.mq-y1) + file-list.content-y;
+                    width: abs(root.mq-x1 - root.mq-x0);
+                    height: abs(root.mq-y1 - root.mq-y0);
+                    background: Palette.accent-background.transparentize(0.75);
+                    border-width: 1px;
+                    border-color: Palette.accent-background;
+                }
+                if root.error-text != "": Rectangle {
+                    Text {
+                        x: 24px;
+                        y: 24px;
+                        width: parent.width - 48px;
+                        text: root.error-text;
+                        wrap: word-wrap;
+                        font-size: 14px;
+                        color: Theme.text-secondary;
+                    }
+                }
+                if root.error-text == "" && !root.loading && root.rows.length == 0: Text {
+                    y: 24px;
+                    text: root.filtering ? "Aucun élément ne correspond au filtre." : "Ce dossier est vide.";
+                    font-size: 12px;
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        Rectangle {
+            height: 26px;
+            Text {
+                x: 16px;
+                width: parent.width - 24px;
+                text: root.loading ? "Chargement…  " + root.status : root.status;
+                font-size: 12px;
+                color: Theme.text-secondary;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+component TabStrip inherits Rectangle {
+    in property <[TabItem]> tabs;
+    clip: true;
+    callback activated(int);
+    callback closed(int);
+    callback new-tab();
+    height: 36px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-top: 4px;
+        spacing: 2px;
+        alignment: start;
+        for item[i] in root.tabs: Rectangle {
+            width: 200px;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            background: item.active ? Theme.layer : tta.has-hover ? Theme.hover : transparent;
+            accessible-role: tab;
+            accessible-label: item.title;
+            tta := TouchArea {
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.up && e.button == PointerEventButton.middle {
+                        root.closed(i);
+                    } else if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                        root.activated(i);
+                    }
+                }
+            }
+            Text {
+                x: 12px;
+                width: parent.width - 44px;
+                text: item.title;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Rectangle {
+                x: parent.width - 30px;
+                width: 24px;
+                height: 24px;
+                border-radius: 4px;
+                background: cta.has-hover ? Theme.hover : transparent;
+                cta := TouchArea {
+                    clicked => { root.closed(i); }
+                }
+                Text {
+                    text: "\u{E711}";
+                    font-family: Theme.icons;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    color: Theme.text-secondary;
+                }
+            }
+        }
+        ToolButton {
+            glyph: "\u{E710}";
+            tooltip: "Nouvel onglet (Ctrl+T)";
+            height: 28px;
+            width: 32px;
+            clicked => { root.new-tab(); }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: root.folder-title == "" ? "WinDir" : root.folder-title + " — WinDir";
+    preferred-width: 1200px;
+    preferred-height: 760px;
+    min-width: 560px;
+    min-height: 360px;
+    default-font-family: "Segoe UI Variable Text";
+    in property <bool> mica: true;
+    background: mica ? transparent : Palette.background;
+
+    // --- Fenêtre ---
+    in property <[TabItem]> tabs;
+    in property <bool> dual;
+    in property <int> active-pane;
+    in property <[NavItem]> nav-items;
+    in property <[Crumb]> crumbs;
+    in property <[string]> suggestions;
+    in-out property <int> suggestion-index: -1;
+    in property <string> folder-title;
+    in-out property <string> address;
+    in-out property <bool> address-editing;
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    in property <bool> can-up;
+    in-out property <string> filter-text;
+
+    // --- Volets (suffixe = index du volet) ---
+    in property <[Row]> rows-0;
+    in property <[Row]> rows-1;
+    in property <string> status-0;
+    in property <string> status-1;
+    in property <string> error-text-0;
+    in property <string> error-text-1;
+    in property <bool> loading-0;
+    in property <bool> loading-1;
+    in property <bool> filtering-0;
+    in property <bool> filtering-1;
+    in property <int> sort-column-0;
+    in property <int> sort-column-1;
+    in property <bool> sort-descending-0;
+    in property <bool> sort-descending-1;
+    in property <int> rename-row-0: -1;
+    in property <int> rename-row-1: -1;
+    in property <string> rename-text-0;
+    in property <string> rename-text-1;
+    in property <int> rename-stem-0;
+    in property <int> rename-stem-1;
+    in property <int> drop-row-0: -1;
+    in property <int> drop-row-1: -1;
+    out property <int> page-rows-0: p0.page-rows;
+    out property <int> page-rows-1: p1.page-rows;
+    out property <length> max-scroll-0: p0.max-scroll;
+    out property <length> max-scroll-1: p1.max-scroll;
+    out property <length> scroll-y-0: p0.scroll-y;
+    out property <length> scroll-y-1: p1.scroll-y;
+
+    // --- Volet d'aperçu ---
+    in property <bool> preview-visible;
+    // 0 message, 1 texte, 2 image, 3 aperçu natif (fenêtre enfant posée par Rust)
+    in property <int> preview-kind;
+    in property <string> preview-title;
+    in property <string> preview-text;
+    in property <image> preview-image;
+    out property <length> preview-x: preview-area.absolute-position.x;
+    out property <length> preview-y: preview-area.absolute-position.y;
+    out property <length> preview-width: preview-area.width;
+    out property <length> preview-height: preview-area.height;
+
+    // --- Palette de commandes ---
+    in-out property <bool> palette-open;
+    in-out property <string> palette-query;
+    in property <[PaletteItem]> palette-items;
+    in-out property <int> palette-index;
+
+    // --- Actions vers Rust ---
+    callback navigate-to(string);
+    callback address-edited(string);
+    callback go-back();
+    callback go-forward();
+    callback go-up();
+    callback refresh();
+    callback nav-activated(string);
+    callback crumb-activated(string);
+    callback filter-edited(string);
+    callback tab-activated(int);
+    callback tab-closed(int);
+    callback new-tab();
+    callback toggle-dual();
+    callback toggle-preview();
+    callback pane-activated(pane: int);
+    callback sort-by(pane: int, col: int);
+    callback row-pointer(pane: int, row: int, kind: int, ctrl: bool, shift: bool, on-name: bool);
+    callback background-pointer(pane: int, kind: int, ctrl: bool, shift: bool);
+    callback drag-out(pane: int, row: int);
+    callback marquee-changed(pane: int, row-a: int, row-b: int, ctrl: bool);
+    callback marquee-ended(pane: int);
+    callback rename-commit(pane: int, text: string);
+    callback rename-cancel(pane: int);
+    // pane = -1 : touche reçue hors des listes.
+    callback key(pane: int, text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
+    callback palette-edited(string);
+    callback palette-run(int);
+
+    public function scroll-to-row(pane: int, row: int) {
+        if pane == 1 { p1.scroll-to-row(row); } else { p0.scroll-to-row(row); }
+    }
+    public function set-scroll(pane: int, y: length) {
+        if pane == 1 { p1.set-scroll(y); } else { p0.set-scroll(y); }
+    }
+    public function focus-list(pane: int) {
+        if pane == 1 { p1.focus-list(); } else { p0.focus-list(); }
+    }
+    // Volet sous un point de la fenêtre (pixels logiques), -1 si aucun.
+    public function pane-at(x: length, y: length) -> int {
+        if p0.contains(x, y) {
+            return 0;
+        }
+        if root.dual && p1.contains(x, y) {
+            return 1;
+        }
+        return -1;
+    }
+    public function row-at(pane: int, x: length, y: length) -> int {
+        if pane == 1 { return p1.row-at(x, y); }
+        return p0.row-at(x, y);
+    }
+    public function row-anchor-x(pane: int) -> length {
+        if pane == 1 { return p1.row-anchor-x(); }
+        return p0.row-anchor-x();
+    }
+    public function row-anchor-y(pane: int, row: int) -> length {
+        if pane == 1 { return p1.row-anchor-y(row); }
+        return p0.row-anchor-y(row);
+    }
+    public function open-palette() {
+        root.palette-open = true;
+        root.palette-query = "";
+        root.palette-index = 0;
+        root.palette-edited("");
+    }
+
+    function start-address-edit() {
+        root.address-editing = true;
+        address-edit.focus();
+        address-edit.select-all();
+    }
 
     global-keys := FocusScope {
         key-pressed(event) => {
@@ -484,19 +862,30 @@ export component MainWindow inherits Window {
                 filter-edit.select-all();
                 return accept;
             }
-            if root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt) {
+            if event.modifiers.control && event.modifiers.shift && (event.text == "p" || event.text == "P") {
+                root.open-palette();
+                return accept;
+            }
+            if root.key(-1, event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt) {
                 return accept;
             }
             reject
         }
 
         VerticalLayout {
+            TabStrip {
+                tabs: root.tabs;
+                activated(i) => { root.tab-activated(i); }
+                closed(i) => { root.tab-closed(i); }
+                new-tab => { root.new-tab(); }
+            }
             // --- Barre de navigation ---
             HorizontalLayout {
                 padding: 8px;
+                padding-top: 4px;
                 padding-bottom: 4px;
                 spacing: 4px;
-                height: 48px;
+                height: 44px;
                 ToolButton {
                     glyph: "\u{E72B}";
                     tooltip: "Précédent (Alt+Gauche)";
@@ -517,7 +906,7 @@ export component MainWindow inherits Window {
                 }
                 ToolButton {
                     glyph: "\u{E72C}";
-                    tooltip: "Actualiser (F5)";
+                    tooltip: "Actualiser (F5, Ctrl+R en double volet)";
                     clicked => { root.refresh(); }
                 }
                 address-box := Rectangle {
@@ -525,11 +914,9 @@ export component MainWindow inherits Window {
                     border-radius: 4px;
                     clip: true;
                     background: Theme.field;
-                    // Fil d'Ariane : un clic sur un segment navigue, un clic ailleurs édite.
                     if !root.address-editing: TouchArea {
                         clicked => { root.start-address-edit(); }
                     }
-                    // Chemin trop long : on montre la fin, comme l'Explorateur.
                     if !root.address-editing: HorizontalLayout {
                         width: self.preferred-width;
                         x: min(0px, address-box.width - self.preferred-width - 6px);
@@ -576,12 +963,12 @@ export component MainWindow inherits Window {
                             root.address-editing = false;
                             root.navigate-to(root.suggestion-index >= 0 && root.suggestion-index < root.suggestions.length
                                 ? root.suggestions[root.suggestion-index] : t);
-                            list-focus.focus();
+                            root.focus-list(root.active-pane);
                         }
                         key-pressed(e) => {
                             if e.text == Key.Escape {
                                 root.address-editing = false;
-                                list-focus.focus();
+                                root.focus-list(root.active-pane);
                                 return accept;
                             }
                             if e.text == Key.DownArrow && root.suggestions.length > 0 {
@@ -608,7 +995,7 @@ export component MainWindow inherits Window {
                     }
                 }
                 filter-edit := LineEdit {
-                    width: 240px;
+                    width: 220px;
                     placeholder-text: "Filtrer ce dossier";
                     text <=> root.filter-text;
                     font-size: 12px;
@@ -618,189 +1005,131 @@ export component MainWindow inherits Window {
                         if event.text == Key.Escape {
                             root.filter-text = "";
                             root.filter-edited("");
-                            list-focus.focus();
+                            root.focus-list(root.active-pane);
                             return accept;
                         }
                         if event.text == Key.DownArrow {
-                            list-focus.focus();
+                            root.focus-list(root.active-pane);
                             return reject;
                         }
                         reject
                     }
                 }
+                ToolButton {
+                    glyph: "\u{E89F}";
+                    tooltip: "Double volet (F6)";
+                    clicked => { root.toggle-dual(); }
+                }
+                ToolButton {
+                    glyph: "\u{E8A1}";
+                    tooltip: "Volet d'aperçu (Alt+P)";
+                    clicked => { root.toggle-preview(); }
+                }
             }
 
             HorizontalLayout {
+                spacing: 4px;
                 NavPane {
                     items: root.nav-items;
                     activated(path) => { root.nav-activated(path); }
                 }
-                // --- Contenu ---
+                p0 := FolderPane {
+                    horizontal-stretch: 1;
+                    rows: root.rows-0;
+                    active: root.active-pane == 0;
+                    show-active: root.dual && root.active-pane == 0;
+                    status: root.status-0;
+                    error-text: root.error-text-0;
+                    loading: root.loading-0;
+                    filtering: root.filtering-0;
+                    sort-column: root.sort-column-0;
+                    sort-descending: root.sort-descending-0;
+                    rename-row: root.rename-row-0;
+                    rename-text: root.rename-text-0;
+                    rename-stem: root.rename-stem-0;
+                    drop-row: root.drop-row-0;
+                    activated => { root.pane-activated(0); }
+                    sort-by(c) => { root.sort-by(0, c); }
+                    row-pointer(r, k, c, s, n) => { root.row-pointer(0, r, k, c, s, n); }
+                    background-pointer(k, c, s) => { root.background-pointer(0, k, c, s); }
+                    drag-out(r) => { root.drag-out(0, r); }
+                    marquee-changed(a, b, c) => { root.marquee-changed(0, a, b, c); }
+                    marquee-ended => { root.marquee-ended(0); }
+                    rename-commit(t) => { root.rename-commit(0, t); }
+                    rename-cancel => { root.rename-cancel(0); }
+                    key(t, c, s, a) => { root.key(0, t, c, s, a) }
+                }
+                p1 := FolderPane {
+                    horizontal-stretch: root.dual ? 1 : 0;
+                    max-width: root.dual ? 100000px : 0px;
+                    visible: root.dual;
+                    rows: root.rows-1;
+                    active: root.active-pane == 1;
+                    show-active: root.dual && root.active-pane == 1;
+                    status: root.status-1;
+                    error-text: root.error-text-1;
+                    loading: root.loading-1;
+                    filtering: root.filtering-1;
+                    sort-column: root.sort-column-1;
+                    sort-descending: root.sort-descending-1;
+                    rename-row: root.rename-row-1;
+                    rename-text: root.rename-text-1;
+                    rename-stem: root.rename-stem-1;
+                    drop-row: root.drop-row-1;
+                    activated => { root.pane-activated(1); }
+                    sort-by(c) => { root.sort-by(1, c); }
+                    row-pointer(r, k, c, s, n) => { root.row-pointer(1, r, k, c, s, n); }
+                    background-pointer(k, c, s) => { root.background-pointer(1, k, c, s); }
+                    drag-out(r) => { root.drag-out(1, r); }
+                    marquee-changed(a, b, c) => { root.marquee-changed(1, a, b, c); }
+                    marquee-ended => { root.marquee-ended(1); }
+                    rename-commit(t) => { root.rename-commit(1, t); }
+                    rename-cancel => { root.rename-cancel(1); }
+                    key(t, c, s, a) => { root.key(1, t, c, s, a) }
+                }
+                // --- Volet d'aperçu ---
                 Rectangle {
+                    width: root.preview-visible ? 340px : 0px;
+                    visible: root.preview-visible;
                     background: Theme.layer;
                     border-top-left-radius: 8px;
                     VerticalLayout {
-                        padding-top: 4px;
-                        Rectangle {
-                            height: 32px;
-                            HorizontalLayout {
-                                padding-left: 4px;
-                                alignment: start;
-                                HeaderCell {
-                                    text: "Nom";
-                                    col-width <=> root.w-name;
-                                    sorted: root.sort-column == 0;
-                                    descending: root.sort-descending;
-                                    clicked => { root.sort-by(0); }
-                                }
-                                HeaderCell {
-                                    text: "État";
-                                    col-width <=> root.w-state;
-                                }
-                                HeaderCell {
-                                    text: "Modifié le";
-                                    col-width <=> root.w-date;
-                                    sorted: root.sort-column == 1;
-                                    descending: root.sort-descending;
-                                    clicked => { root.sort-by(1); }
-                                }
-                                HeaderCell {
-                                    text: "Type";
-                                    col-width <=> root.w-type;
-                                    sorted: root.sort-column == 2;
-                                    descending: root.sort-descending;
-                                    clicked => { root.sort-by(2); }
-                                }
-                                HeaderCell {
-                                    text: "Taille";
-                                    align-right: true;
-                                    col-width <=> root.w-size;
-                                    sorted: root.sort-column == 3;
-                                    descending: root.sort-descending;
-                                    clicked => { root.sort-by(3); }
-                                }
-                            }
+                        padding: 12px;
+                        spacing: 8px;
+                        Text {
+                            text: root.preview-title;
+                            font-size: 14px;
+                            font-weight: 600;
+                            overflow: elide;
                         }
-                        list-area := Rectangle {
-                            list-focus := FocusScope {
-                                accessible-role: list;
-                                accessible-label: "Contenu du dossier";
-                                key-pressed(event) => {
-                                    if root.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt) {
-                                        return accept;
-                                    }
-                                    reject
-                                }
-                                // Zone vide sous les lignes : désélection, menu de fond, rectangle.
-                                TouchArea {
-                                    pointer-event(e) => {
-                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                                            list-focus.focus();
-                                            root.mq-x0 = self.mouse-x;
-                                            root.mq-y0 = self.mouse-y - file-list.content-y;
-                                            root.marquee-active = false;
-                                            root.background-pointer(0, e.modifiers.control, e.modifiers.shift);
-                                        } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
-                                            if root.marquee-active {
-                                                root.marquee-active = false;
-                                                root.marquee-ended();
-                                            }
-                                        } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
-                                            root.background-pointer(3, e.modifiers.control, e.modifiers.shift);
-                                        }
-                                    }
-                                    moved => {
-                                        if self.pressed {
-                                            root.marquee-update(self.mouse-x, self.mouse-y - file-list.content-y, false);
-                                        }
-                                    }
-                                }
-                                file-list := ListView {
-                                    for row[i] in root.rows: FileRow {
-                                        data: row;
-                                        index: i;
-                                        list-has-focus: list-focus.has-focus;
-                                        drop-target: i == root.drop-row;
-                                        renaming: i == root.rename-row;
-                                        rename-text: root.rename-text;
-                                        rename-stem: root.rename-stem;
-                                        w-name: root.w-name;
-                                        w-state: root.w-state;
-                                        w-date: root.w-date;
-                                        w-type: root.w-type;
-                                        w-size: root.w-size;
-                                        pointer(kind, ctrl, shift, on-name) => {
-                                            if kind == 0 {
-                                                list-focus.focus();
-                                                root.drag-started = false;
-                                                root.mq-x0 = 0px;
-                                                root.mq-y0 = i * Theme.row-height;
-                                                root.marquee-active = false;
-                                            }
-                                            if kind == 1 && root.marquee-active {
-                                                root.marquee-active = false;
-                                                root.marquee-ended();
-                                                return;
-                                            }
-                                            root.row-pointer(i, kind, ctrl, shift, on-name);
-                                        }
-                                        drag-moved(cx, cy, on-name) => {
-                                            if on-name {
-                                                if !root.drag-started && abs(cy - root.mq-y0) > 6px {
-                                                    root.drag-started = true;
-                                                    root.drag-out(i);
-                                                }
-                                            } else {
-                                                root.marquee-update(cx, cy, false);
-                                            }
-                                        }
-                                        rename-commit(t) => { root.rename-commit(t); }
-                                        rename-cancel => { root.rename-cancel(); }
-                                    }
-                                }
-                                if root.marquee-active: Rectangle {
-                                    x: min(root.mq-x0, root.mq-x1);
-                                    y: min(root.mq-y0, root.mq-y1) + file-list.content-y;
-                                    width: abs(root.mq-x1 - root.mq-x0);
-                                    height: abs(root.mq-y1 - root.mq-y0);
-                                    background: Palette.accent-background.transparentize(0.75);
-                                    border-width: 1px;
-                                    border-color: Palette.accent-background;
-                                }
-                                if root.error-text != "": Rectangle {
-                                    Text {
-                                        x: 24px;
-                                        y: 24px;
-                                        width: parent.width - 48px;
-                                        text: root.error-text;
-                                        wrap: word-wrap;
-                                        font-size: 14px;
-                                        color: Theme.text-secondary;
-                                    }
-                                }
-                                if root.error-text == "" && !root.loading && root.rows.length == 0: Text {
-                                    y: 24px;
-                                    text: root.filter-text == "" ? "Ce dossier est vide." : "Aucun élément ne correspond au filtre.";
-                                    font-size: 12px;
-                                    color: Theme.text-secondary;
-                                    horizontal-alignment: center;
-                                }
+                        preview-area := Rectangle {
+                            vertical-stretch: 1;
+                            clip: true;
+                            if root.preview-kind == 0: Text {
+                                width: parent.width;
+                                text: root.preview-text;
+                                font-size: 12px;
+                                color: Theme.text-secondary;
+                                wrap: word-wrap;
+                                horizontal-alignment: center;
+                            }
+                            if root.preview-kind == 1: Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: root.preview-text;
+                                font-family: "Cascadia Mono";
+                                font-size: 11px;
+                                wrap: word-wrap;
+                                vertical-alignment: top;
+                            }
+                            if root.preview-kind == 2: Image {
+                                width: parent.width;
+                                height: parent.height;
+                                source: root.preview-image;
+                                image-fit: contain;
                             }
                         }
                     }
-                }
-            }
-
-            // --- Barre d'état ---
-            Rectangle {
-                height: 26px;
-                background: Theme.layer;
-                Text {
-                    x: 16px;
-                    text: root.loading ? "Chargement…  " + root.status : root.status;
-                    font-size: 12px;
-                    color: Theme.text-secondary;
-                    vertical-alignment: center;
                 }
             }
         }
@@ -828,7 +1157,7 @@ export component MainWindow inherits Window {
                     clicked => {
                         root.address-editing = false;
                         root.navigate-to(s);
-                        list-focus.focus();
+                        root.focus-list(root.active-pane);
                     }
                 }
                 Text {
@@ -837,6 +1166,87 @@ export component MainWindow inherits Window {
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
+                }
+            }
+        }
+    }
+
+    // Palette de commandes (Ctrl+Maj+P).
+    if root.palette-open: Rectangle {
+        background: #00000030;
+        TouchArea {
+            clicked => {
+                root.palette-open = false;
+                root.focus-list(root.active-pane);
+            }
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 80px;
+            width: min(560px, parent.width - 40px);
+            height: 52px + min(root.palette-items.length, 12) * 32px;
+            background: Theme.popup;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.divider;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000060;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                LineEdit {
+                    placeholder-text: "Rechercher une commande";
+                    init => { self.focus(); }
+                    text <=> root.palette-query;
+                    font-size: 13px;
+                    edited(t) => {
+                        root.palette-index = 0;
+                        root.palette-edited(t);
+                    }
+                    accepted => {
+                        root.palette-open = false;
+                        root.palette-run(root.palette-index);
+                    }
+                    key-pressed(e) => {
+                        if e.text == Key.Escape {
+                            root.palette-open = false;
+                            root.focus-list(root.active-pane);
+                            return accept;
+                        }
+                        if e.text == Key.DownArrow {
+                            root.palette-index = min(root.palette-items.length - 1, root.palette-index + 1);
+                            return accept;
+                        }
+                        if e.text == Key.UpArrow {
+                            root.palette-index = max(0, root.palette-index - 1);
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+                for item[i] in root.palette-items: Rectangle {
+                    height: 32px;
+                    border-radius: 4px;
+                    background: i == root.palette-index ? Theme.selected : pta.has-hover ? Theme.hover : transparent;
+                    pta := TouchArea {
+                        clicked => {
+                            root.palette-open = false;
+                            root.palette-run(i);
+                        }
+                    }
+                    Text {
+                        x: 10px;
+                        text: item.label;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: parent.width - self.width - 10px;
+                        text: item.hint;
+                        font-size: 11px;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }

@@ -214,6 +214,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    let explicit_path = args.path.clone();
     let start = args
         .self_test
         .clone()
@@ -258,6 +259,9 @@ fn main() -> ExitCode {
             .map(std::time::Duration::from_secs)
             .unwrap_or(cfg.network_timeout),
         startup_warning: warnings.first().cloned(),
+        // Sans dossier explicite, on reprend les onglets de la session précédente.
+        restore_session: !benching && explicit_path.is_none(),
+        data_dir: std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("WinDir")),
         bench,
         main_start,
     };

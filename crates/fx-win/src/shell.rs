@@ -193,3 +193,34 @@ pub fn error_box(title: &str, text: &str) {
         MessageBoxW(None, PCWSTR(m.as_ptr()), PCWSTR(t.as_ptr()), MB_OK | MB_ICONERROR);
     }
 }
+
+/// Boîte de dialogue « Propriétés » de Windows pour un ou plusieurs éléments d'un même dossier.
+/// À appeler sur un thread STA qui pompe des messages (l'hôte Shell).
+pub fn show_properties(paths: &[PathBuf], owner: isize) -> windows::core::Result<()> {
+    use windows::Win32::UI::Shell::{SHMultiFileProperties, SHOP_FILEPATH, SHObjectProperties};
+    match paths {
+        [] => Ok(()),
+        [single] => {
+            let wide = crate::path::shell_path(single);
+            // SAFETY: chaîne terminée par un nul vivante pendant l'appel.
+            let ok = unsafe {
+                SHObjectProperties(
+                    Some(HWND(owner as *mut c_void)),
+                    SHOP_FILEPATH,
+                    PCWSTR(wide.as_ptr()),
+                    PCWSTR::null(),
+                )
+            };
+            if ok.as_bool() {
+                Ok(())
+            } else {
+                Err(windows::core::Error::from_thread())
+            }
+        }
+        many => {
+            let data = crate::dragdrop::data_object(many)?;
+            // SAFETY: objet de données du Shell valide.
+            unsafe { SHMultiFileProperties(&data, 0) }
+        }
+    }
+}

@@ -11,6 +11,7 @@ pub mod format;
 pub mod history;
 pub mod loader;
 pub mod selection;
+pub mod size;
 pub mod sort;
 pub mod source;
 #[cfg(all(windows, feature = "windows"))]

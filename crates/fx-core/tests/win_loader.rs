@@ -152,3 +152,25 @@ fn errors_reach_the_loader_classified() -> Res {
     assert!(matches!(r, Outcome::Failed(ErrorKind::AccessDenied)));
     Ok(())
 }
+
+#[test]
+fn folder_size_does_not_follow_junction_loops() -> Res {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    std::fs::write(root.join("a.bin"), vec![0u8; 1000])?;
+    std::fs::create_dir(root.join("sous"))?;
+    std::fs::write(root.join("sous").join("b.bin"), vec![0u8; 24])?;
+    let ok = Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(root.join("sous").join("boucle"))
+        .arg(root)
+        .output()?
+        .status
+        .success();
+    assert!(ok);
+    let p = fx_core::size::compute(&WinSource::default(), root);
+    assert_eq!(p.bytes(), 1024, "la jonction ne doit pas être suivie");
+    Ok(())
+}

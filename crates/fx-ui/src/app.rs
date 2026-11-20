@@ -1,42 +1,34 @@
-//! Contrôleur de la fenêtre : navigation, surveillance, sélection, clavier, menu contextuel,
-//! renommage, opérations sur les fichiers, presse-papiers, glisser-déposer et instrumentation.
+//! Contrôleur de la fenêtre : onglets, double volet, routage des événements vers le volet
+//! concerné, services globaux (hôte Shell, icônes, glisser-déposer), commandes (palette,
+//! favoris, terminal, propriétés, tailles de dossiers), session et instrumentation.
 //!
-//! Règle : aucun emprunt de `State` n'est gardé pendant un appel à l'interface Slint ou au
-//! modèle, car ces appels peuvent déclencher des callbacks qui reviennent ici.
+//! L'état et la logique d'une vue de dossier sont dans [`crate::pane`].
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
-use std::os::windows::ffi::OsStrExt;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fx_core::Folder;
-use fx_core::filter::Filter;
-use fx_core::format::{group_thousands, human_size, item_count};
-use fx_core::history::{History, parent_of};
-use fx_core::loader::{ApplyResult, LoadEvent, LoadStats, Loader, Sink, ViewResult};
-use fx_core::selection::{Selection, TypeAhead};
-use fx_core::sort::{NameKeys, SortColumn, SortSpec};
-use fx_core::source::FsEvent;
+use fx_core::loader::Loader;
+use fx_core::source::DirSource;
 use fx_core::sys::{WinCollator, WinSource};
-use fx_win::context_menu::{AppCommand, MenuOptions, MenuOutcome};
-use fx_win::fileop::{FileOp, OpOutcome};
+use fx_win::context_menu::MenuOptions;
 use fx_win::shell_host::ShellHost;
-use slint::platform::{Key, PointerEventButton, WindowEvent as SlintEvent};
+use slint::platform::Key;
 use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::{EventResult, WinitWindowAccessor};
-use slint::{ComponentHandle, LogicalPosition, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::icons::IconLoader;
 use crate::model::FolderModel;
 use crate::nav::NavEntry;
-use crate::ops::{self, Job};
-use crate::{Crumb, MainWindow, NavItem, Options, UiError};
+use crate::ops::Job;
+use crate::pane::{Pane, post_pane, same_path, with_pane};
+use crate::{MainWindow, NavItem, Options, PaletteItem, TabItem, UiError};
 
-/// Modes de mesure (`--bench-startup`, `--bench-open`).
+/// Modes de mesure (`--bench-startup`, `--bench-open`…).
 #[derive(Debug, Clone)]
 pub enum BenchMode {
     /// Mesure le démarrage puis quitte.
@@ -57,68 +49,29 @@ thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
 }
 
-fn with_app(f: impl FnOnce(&Rc<App>)) {
+pub(crate) fn with_app(f: impl FnOnce(&Rc<App>)) {
     let app = APP.with_borrow(|a| a.clone());
     if let Some(app) = app {
         f(&app);
     }
 }
 
-fn with_app_ret<R>(f: impl FnOnce(&Rc<App>) -> R) -> Option<R> {
+pub(crate) fn with_app_ret<R>(f: impl FnOnce(&Rc<App>) -> R) -> Option<R> {
     let app = APP.with_borrow(|a| a.clone())?;
     Some(f(&app))
 }
 
+/// Accès à la fenêtre Slint (thread d'interface).
+pub(crate) fn with_ui<R>(f: impl FnOnce(&MainWindow) -> R) -> Option<R> {
+    let app = APP.with_borrow(|a| a.clone())?;
+    Some(f(&app.ui))
+}
+
 /// Exécute `f` sur le thread d'interface (appelable depuis n'importe quel thread).
-fn post(f: impl FnOnce(&Rc<App>) + Send + 'static) {
+pub(crate) fn post(f: impl FnOnce(&Rc<App>) + Send + 'static) {
     if let Err(e) = slint::invoke_from_event_loop(move || with_app(f)) {
         tracing::warn!("événement perdu, boucle d'interface arrêtée : {e}");
     }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct NavTiming {
-    first_rows: Option<Duration>,
-    first_paint: Option<Duration>,
-    complete: Option<Duration>,
-    complete_paint: Option<Duration>,
-    stats: LoadStats,
-}
-
-const PAINT_FIRST: u8 = 1;
-const PAINT_COMPLETE: u8 = 2;
-/// Délai pendant lequel on attend l'apparition d'éléments créés pour les sélectionner.
-const PENDING_SELECT_TIMEOUT: Duration = Duration::from_secs(5);
-const INVALID_NAME_CHARS: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
-
-#[derive(Default)]
-struct State {
-    folder: Option<Arc<Folder>>,
-    keys: Option<Arc<NameKeys>>,
-    order: Arc<Vec<u32>>,
-    /// Tri demandé au chargeur pour le chargement en cours.
-    load_spec: SortSpec,
-    /// Tri voulu par l'utilisateur.
-    spec: SortSpec,
-    filter: Filter,
-    /// Incrémenté à chaque changement de tri ou de filtre.
-    view_version: u64,
-    apply_version: u64,
-    complete: bool,
-    /// Noms à sélectionner dès qu'ils apparaissent (retour au parent, création, collage).
-    pending_select: Vec<Vec<u16>>,
-    pending_since: Option<Instant>,
-    /// Passer en renommage dès que l'élément attendu apparaît (nouveau dossier).
-    pending_rename: bool,
-    watcher: Option<Box<dyn Send>>,
-    applying: bool,
-    queued: Vec<FsEvent>,
-    rename_entry: Option<u32>,
-    /// Appui sur un élément déjà sélectionné : la sélection ne change qu'au relâchement
-    /// (pour pouvoir glisser plusieurs éléments).
-    press_deferred: Option<usize>,
-    dragging: bool,
-    marquee_base: Option<Selection>,
 }
 
 struct BenchState {
@@ -129,33 +82,108 @@ struct BenchState {
     initial_painted_ms: Option<f64>,
     iteration: usize,
     on_target: bool,
-    results: Vec<NavTiming>,
+    results: Vec<crate::pane::NavTiming>,
     entries: usize,
     report: String,
 }
 
+/// Un onglet : un ou deux volets.
+pub(crate) struct Tab {
+    pub panes: [Rc<Pane>; 2],
+    pub dual: Cell<bool>,
+    /// Volet actif (0 ou 1).
+    pub focus: Cell<usize>,
+}
+
+/// Onglet fermé, pour Ctrl+Maj+T.
+struct ClosedTab {
+    paths: [Option<PathBuf>; 2],
+    dual: bool,
+}
+
+/// Commandes de la palette (Ctrl+Maj+P).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cmd {
+    NewTab,
+    CloseTab,
+    ReopenTab,
+    NextTab,
+    ToggleDual,
+    SwitchPane,
+    CopyToOther,
+    MoveToOther,
+    TogglePreview,
+    ToggleHidden,
+    Refresh,
+    NewFolder,
+    SelectAll,
+    Rename,
+    Delete,
+    Properties,
+    CopyPath,
+    OpenTerminal,
+    FolderSize,
+    AddFavorite,
+    RemoveFavorite,
+}
+
+const COMMANDS: &[(Cmd, &str, &str)] = &[
+    (Cmd::NewTab, "Nouvel onglet", "Ctrl+T"),
+    (Cmd::CloseTab, "Fermer l'onglet", "Ctrl+W"),
+    (Cmd::ReopenTab, "Rouvrir l'onglet fermé", "Ctrl+Maj+T"),
+    (Cmd::NextTab, "Onglet suivant", "Ctrl+Tab"),
+    (Cmd::ToggleDual, "Double volet", "F6"),
+    (Cmd::SwitchPane, "Passer à l'autre volet", "Tab"),
+    (Cmd::CopyToOther, "Copier vers l'autre volet", "F5 (double volet)"),
+    (
+        Cmd::MoveToOther,
+        "Déplacer vers l'autre volet",
+        "Maj+F5 (double volet)",
+    ),
+    (Cmd::TogglePreview, "Volet d'aperçu", "Alt+P"),
+    (
+        Cmd::ToggleHidden,
+        "Afficher ou masquer les éléments cachés",
+        "Ctrl+H",
+    ),
+    (Cmd::Refresh, "Actualiser", "F5 / Ctrl+R"),
+    (Cmd::NewFolder, "Nouveau dossier", "Ctrl+Maj+N"),
+    (Cmd::SelectAll, "Tout sélectionner", "Ctrl+A"),
+    (Cmd::Rename, "Renommer", "F2"),
+    (Cmd::Delete, "Supprimer (corbeille)", "Suppr"),
+    (Cmd::Properties, "Propriétés", "Alt+Entrée"),
+    (Cmd::CopyPath, "Copier le chemin d'accès", "Ctrl+Maj+C"),
+    (Cmd::OpenTerminal, "Ouvrir dans le terminal", "Ctrl+Maj+`"),
+    (Cmd::FolderSize, "Calculer la taille des dossiers", "Ctrl+Maj+S"),
+    (Cmd::AddFavorite, "Ajouter aux favoris", "Ctrl+D"),
+    (Cmd::RemoveFavorite, "Retirer des favoris", ""),
+];
+
 pub(crate) struct App {
-    ui: MainWindow,
-    loader: Arc<Loader>,
-    model: Rc<FolderModel>,
-    host: Option<ShellHost>,
-    history: RefCell<History>,
-    generation: Cell<u64>,
-    view_seq: Cell<u64>,
-    st: RefCell<State>,
-    hwnd: Cell<Option<isize>>,
+    pub ui: MainWindow,
+    pub hwnd: Cell<Option<isize>>,
+    pub show_hidden: Cell<bool>,
+    pub network_timeout: Duration,
+    pub drive_labels: RefCell<HashMap<PathBuf, String>>,
     mica: bool,
-    show_hidden: Cell<bool>,
-    network_timeout: Duration,
+    host: Option<ShellHost>,
+    icons: Arc<IconLoader>,
+    icon_px: Cell<u32>,
+    source: Arc<WinSource>,
     nav_entries: RefCell<Vec<NavEntry>>,
-    drive_labels: RefCell<HashMap<PathBuf, String>>,
+    favorites: RefCell<Vec<PathBuf>>,
+    data_dir: Option<PathBuf>,
+    tabs: RefCell<Vec<Rc<Tab>>>,
+    active_tab: Cell<usize>,
+    closed_tabs: RefCell<Vec<ClosedTab>>,
+    next_id: Cell<u64>,
     suggest_seq: Cell<u64>,
-    status_seq: Cell<u64>,
-    type_ahead: RefCell<TypeAhead>,
+    session_seq: Cell<u64>,
+    palette: RefCell<Vec<Cmd>>,
+    preview_visible: Cell<bool>,
+    preview_seq: Cell<u64>,
     drop_reg: RefCell<Option<fx_win::dragdrop::DropRegistration>>,
-    nav_start: Cell<Instant>,
-    timing: Cell<NavTiming>,
-    paint_wait: Cell<u8>,
+    drop_pane: Cell<Option<u64>>,
     frames: Cell<u64>,
     main_start: Instant,
     bench: RefCell<Option<BenchState>>,
@@ -166,10 +194,9 @@ pub(crate) struct App {
 pub(crate) fn run(options: Options) -> Result<(), UiError> {
     let ui = MainWindow::new()?;
     ui.set_mica(options.mica);
-    let icons = IconLoader::start(2, |batch| post(move |a| a.model.on_icons(batch)));
-    let model = Rc::new(FolderModel::new(icons));
-    ui.set_rows(ModelRc::from(model.clone()));
-    let loader = Arc::new(Loader::new(Arc::new(WinSource::default()), Arc::new(WinCollator)));
+    let icons = Arc::new(IconLoader::start(2, |batch| {
+        post(move |a| a.deliver_icons(&batch));
+    }));
     let host = match ShellHost::start("fx-shell") {
         Ok(h) => Some(h),
         Err(e) => {
@@ -177,7 +204,6 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
             None
         }
     };
-
     let bench = options.bench.clone().map(|mode| BenchState {
         mode,
         start_path: options.start.clone(),
@@ -190,29 +216,31 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         entries: 0,
         report: String::new(),
     });
-
     let app = Rc::new(App {
         ui: ui.clone_strong(),
-        loader,
-        model,
-        host,
-        history: RefCell::default(),
-        generation: Cell::new(0),
-        view_seq: Cell::new(0),
-        st: RefCell::default(),
         hwnd: Cell::new(None),
-        mica: options.mica,
         show_hidden: Cell::new(options.show_hidden),
         network_timeout: options.network_timeout,
-        nav_entries: RefCell::default(),
         drive_labels: RefCell::default(),
+        mica: options.mica,
+        host,
+        icons,
+        icon_px: Cell::new(16),
+        source: Arc::new(WinSource::default()),
+        nav_entries: RefCell::default(),
+        favorites: RefCell::new(load_favorites(options.data_dir.as_deref())),
+        data_dir: options.data_dir.clone(),
+        tabs: RefCell::default(),
+        active_tab: Cell::new(0),
+        closed_tabs: RefCell::default(),
+        next_id: Cell::new(1),
         suggest_seq: Cell::new(0),
-        status_seq: Cell::new(0),
-        type_ahead: RefCell::default(),
+        session_seq: Cell::new(0),
+        palette: RefCell::default(),
+        preview_visible: Cell::new(false),
+        preview_seq: Cell::new(0),
         drop_reg: RefCell::new(None),
-        nav_start: Cell::new(Instant::now()),
-        timing: Cell::default(),
-        paint_wait: Cell::new(0),
+        drop_pane: Cell::new(None),
         frames: Cell::new(0),
         main_start: options.main_start,
         bench: RefCell::new(bench),
@@ -243,7 +271,7 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
                 }),
                 WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                     let px = (16.0 * scale_factor).round() as u32;
-                    with_app(|a| a.model.set_icon_px(px));
+                    with_app(|a| a.set_icon_px(px));
                 }
                 WindowEvent::RedrawRequested => with_app(|a| a.on_redraw()),
                 _ => {}
@@ -253,66 +281,98 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
     }
 
     crate::nav::build(|entries| post(move |a| a.set_nav(entries)));
-    // Le listing du dossier de départ démarre avant la création de la fenêtre.
-    app.navigate(options.start.clone(), true, Vec::new());
+    // Session précédente, sinon un onglet sur le dossier de départ. Le listing démarre avant
+    // la création de la fenêtre.
+    let restored = options.restore_session && app.restore_session();
+    if !restored {
+        app.open_tab(options.start.clone(), None, false, true);
+    }
     ui.show()?;
-    ui.invoke_focus_list();
+    app.active_pane().ui_focus_list();
     if let Some(w) = options.startup_warning.clone() {
-        app.flash_status(w);
+        app.active_pane().flash_status(w);
     }
     slint::run_event_loop()?;
+    if options.restore_session {
+        app.save_session();
+    }
     app.drop_reg.borrow_mut().take();
     APP.with_borrow_mut(|a| *a = None);
     Ok(())
 }
 
 fn wire_callbacks(ui: &MainWindow) {
-    ui.on_navigate_to(|text| with_app(|a| a.navigate_to(&text)));
-    ui.on_address_edited(|text| with_app(|a| a.address_edited(text.to_string())));
-    ui.on_go_back(|| with_app(|a| a.go_back()));
-    ui.on_go_forward(|| with_app(|a| a.go_forward()));
-    ui.on_go_up(|| with_app(|a| a.go_up()));
-    ui.on_refresh(|| with_app(|a| a.refresh()));
-    ui.on_nav_activated(|p| with_app(|a| a.navigate(PathBuf::from(p.as_str()), true, Vec::new())));
-    ui.on_crumb_activated(|p| with_app(|a| a.navigate_to(&p)));
-    ui.on_sort_by(|col| with_app(|a| a.sort_by(col)));
-    ui.on_filter_edited(|text| with_app(|a| a.filter_edited(&text)));
-    ui.on_row_pointer(|row, kind, ctrl, shift, on_name| {
-        with_app(|a| a.row_pointer(row, kind, ctrl, shift, on_name))
-    });
-    ui.on_background_pointer(|kind, ctrl, shift| with_app(|a| a.background_pointer(kind, ctrl, shift)));
-    ui.on_drag_out(|row| with_app(|a| a.drag_out(row)));
-    ui.on_marquee_changed(|ra, rb, ctrl| with_app(|a| a.marquee_changed(ra, rb, ctrl)));
-    ui.on_marquee_ended(|| with_app(|a| a.st.borrow_mut().marquee_base = None));
-    ui.on_rename_commit(|t| with_app(|a| a.rename_commit(&t)));
-    ui.on_rename_cancel(|| with_app(|a| a.rename_cancel()));
-    ui.on_key(|text, ctrl, shift, alt| with_app_ret(|a| a.on_key(&text, ctrl, shift, alt)).unwrap_or(false));
-}
-
-fn wide(s: &OsStr) -> Vec<u16> {
-    s.encode_wide().collect()
-}
-
-fn column_index(c: SortColumn) -> i32 {
-    match c {
-        SortColumn::Name => 0,
-        SortColumn::Modified => 1,
-        SortColumn::Type => 2,
-        SortColumn::Size => 3,
+    fn pane_at(slot: i32) -> Option<Rc<Pane>> {
+        with_app_ret(|a| a.pane_in_slot(slot)).flatten()
     }
+    ui.on_navigate_to(|text| with_app(|a| a.active_pane().navigate_to(&text)));
+    ui.on_address_edited(|text| with_app(|a| a.address_edited(text.to_string())));
+    ui.on_go_back(|| with_app(|a| a.active_pane().go_back()));
+    ui.on_go_forward(|| with_app(|a| a.active_pane().go_forward()));
+    ui.on_go_up(|| with_app(|a| a.active_pane().go_up()));
+    ui.on_refresh(|| with_app(|a| a.active_pane().refresh()));
+    ui.on_nav_activated(|p| {
+        with_app(|a| {
+            a.active_pane()
+                .navigate(PathBuf::from(p.as_str()), true, Vec::new())
+        })
+    });
+    ui.on_crumb_activated(|p| with_app(|a| a.active_pane().navigate_to(&p)));
+    ui.on_filter_edited(|text| with_app(|a| a.active_pane().filter_edited(&text)));
+    ui.on_tab_activated(|i| with_app(|a| a.activate_tab(i as usize)));
+    ui.on_tab_closed(|i| with_app(|a| a.close_tab(i as usize)));
+    ui.on_new_tab(|| with_app(|a| a.new_tab_here()));
+    ui.on_toggle_dual(|| with_app(|a| a.toggle_dual()));
+    ui.on_toggle_preview(|| with_app(|a| a.toggle_preview()));
+    ui.on_pane_activated(|slot| with_app(|a| a.set_active_pane(slot as usize)));
+    ui.on_sort_by(|slot, col| {
+        if let Some(p) = pane_at(slot) {
+            p.sort_by(col);
+        }
+    });
+    ui.on_row_pointer(|slot, row, kind, ctrl, shift, on_name| {
+        if let Some(p) = pane_at(slot) {
+            p.row_pointer(row, kind, ctrl, shift, on_name);
+        }
+    });
+    ui.on_background_pointer(|slot, kind, ctrl, shift| {
+        if let Some(p) = pane_at(slot) {
+            p.background_pointer(kind, ctrl, shift);
+        }
+    });
+    ui.on_drag_out(|slot, row| {
+        if let Some(p) = pane_at(slot) {
+            p.drag_out(row);
+        }
+    });
+    ui.on_marquee_changed(|slot, ra, rb, ctrl| {
+        if let Some(p) = pane_at(slot) {
+            p.marquee_changed(ra, rb, ctrl);
+        }
+    });
+    ui.on_marquee_ended(|slot| {
+        if let Some(p) = pane_at(slot) {
+            p.st.borrow_mut().marquee_base = None;
+        }
+    });
+    ui.on_rename_commit(|slot, t| {
+        if let Some(p) = pane_at(slot) {
+            p.rename_commit(&t);
+        }
+    });
+    ui.on_rename_cancel(|slot| {
+        if let Some(p) = pane_at(slot) {
+            p.rename_cancel();
+        }
+    });
+    ui.on_key(|slot, text, ctrl, shift, alt| {
+        with_app_ret(|a| a.on_key(slot, &text, ctrl, shift, alt)).unwrap_or(false)
+    });
+    ui.on_palette_edited(|q| with_app(|a| a.palette_filter(&q)));
+    ui.on_palette_run(|i| with_app(|a| a.palette_run(i)));
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
-    let norm = |p: &Path| {
-        fx_win::path::display_form(p)
-            .to_string_lossy()
-            .trim_end_matches('\\')
-            .to_lowercase()
-    };
-    norm(a) == norm(b)
-}
-
-/// Cible de dépôt de la fenêtre : délègue au contrôleur (thread d'interface).
+/// Cible de dépôt de la fenêtre : délègue au volet sous le pointeur (thread d'interface).
 struct UiDrop;
 
 impl fx_win::dragdrop::DropHandler for UiDrop {
@@ -320,11 +380,29 @@ impl fx_win::dragdrop::DropHandler for UiDrop {
         with_app_ret(|a| a.drop_hover(x, y)).flatten()
     }
     fn leave(&self) {
-        with_app(|a| a.ui.set_drop_row(-1));
+        with_app(|a| a.drop_leave());
     }
     fn drop_files(&self, dest: PathBuf, paths: Vec<PathBuf>, effect: u32) {
-        with_app(|a| a.drop_files(dest, paths, effect));
+        with_app(|a| {
+            let pane = a.drop_pane.get().and_then(|id| a.find_pane(id));
+            a.drop_leave();
+            if let Some(p) = pane {
+                p.drop_files(dest, paths, effect);
+            }
+        });
     }
+}
+
+fn load_favorites(dir: Option<&Path>) -> Vec<PathBuf> {
+    let Some(dir) = dir else { return Vec::new() };
+    std::fs::read_to_string(dir.join("favoris.txt"))
+        .map(|t| {
+            t.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl App {
@@ -336,7 +414,7 @@ impl App {
         theme: Option<slint::winit_030::winit::window::Theme>,
     ) {
         self.hwnd.set(crate::window::hwnd(w));
-        self.model.set_icon_px((16.0 * w.scale_factor()).round() as u32);
+        self.set_icon_px((16.0 * w.scale_factor()).round() as u32);
         let Some(h) = self.hwnd.get() else { return };
         crate::window::apply_style(h, theme, self.mica);
         match fx_win::dragdrop::register(h, Box::new(UiDrop)) {
@@ -345,133 +423,358 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------------ navigation
-
-    fn current_path(&self) -> Option<PathBuf> {
-        self.history.borrow().current().map(Path::to_path_buf)
+    fn set_icon_px(&self, px: u32) {
+        self.icon_px.set(px);
+        for p in self.all_panes() {
+            p.model.set_icon_px(px);
+        }
     }
 
-    fn navigate(self: &Rc<Self>, path: PathBuf, push: bool, select: Vec<Vec<u16>>) {
-        let generation = self.generation.get() + 1;
-        self.generation.set(generation);
-        if push {
-            self.history.borrow_mut().navigate(path.clone());
+    fn deliver_icons(&self, batch: &crate::icons::Delivered) {
+        for p in self.all_panes() {
+            p.model.on_icons(batch);
         }
-        self.ui.set_rename_row(-1);
-        let spec = {
-            let mut st = self.st.borrow_mut();
-            st.complete = false;
-            st.pending_since = (!select.is_empty()).then(Instant::now);
-            st.pending_select = select;
-            st.pending_rename = false;
-            st.filter = Filter::default().with_hidden(self.show_hidden.get());
-            st.load_spec = st.spec;
-            st.watcher = None;
-            st.applying = false;
-            st.queued.clear();
-            st.rename_entry = None;
-            st.press_deferred = None;
-            st.marquee_base = None;
-            st.spec
+    }
+
+    pub(crate) fn host_post_raw(
+        &self,
+        job: impl FnOnce(&fx_win::shell_host::HostCtx) + Send + 'static,
+    ) -> bool {
+        self.host.as_ref().is_some_and(|h| h.post(job))
+    }
+
+    // ------------------------------------------------------------------ onglets et volets
+
+    fn new_pane(&self) -> Rc<Pane> {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        let source: Arc<dyn DirSource> = self.source.clone();
+        let loader = Arc::new(Loader::new(source, Arc::new(WinCollator)));
+        let model = Rc::new(FolderModel::new(self.icons.clone()));
+        model.set_icon_px(self.icon_px.get());
+        Rc::new(Pane::new(id, loader, model))
+    }
+
+    fn all_panes(&self) -> Vec<Rc<Pane>> {
+        self.tabs
+            .borrow()
+            .iter()
+            .flat_map(|t| t.panes.iter().cloned())
+            .collect()
+    }
+
+    pub(crate) fn find_pane(&self, id: u64) -> Option<Rc<Pane>> {
+        self.tabs
+            .borrow()
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .find(|p| p.id == id)
+            .cloned()
+    }
+
+    pub(crate) fn active_tab(&self) -> Rc<Tab> {
+        let tabs = self.tabs.borrow();
+        tabs.get(self.active_tab.get())
+            .or_else(|| tabs.first())
+            .cloned()
+            .unwrap_or_else(|| {
+                // Invariant : il y a toujours au moins un onglet après le démarrage. Par sécurité, un
+                // onglet vide (non affiché) plutôt qu'un panic.
+                Rc::new(Tab {
+                    panes: [self.new_pane(), self.new_pane()],
+                    dual: Cell::new(false),
+                    focus: Cell::new(0),
+                })
+            })
+    }
+
+    pub(crate) fn active_pane(&self) -> Rc<Pane> {
+        let t = self.active_tab();
+        t.panes[if t.dual.get() { t.focus.get() } else { 0 }].clone()
+    }
+
+    fn other_pane(&self) -> Option<Rc<Pane>> {
+        let t = self.active_tab();
+        t.dual.get().then(|| t.panes[1 - t.focus.get()].clone())
+    }
+
+    /// Volet affiché à l'emplacement `slot` (0 ou 1) de l'onglet actif.
+    pub(crate) fn pane_in_slot(&self, slot: i32) -> Option<Rc<Pane>> {
+        let t = self.active_tab();
+        match slot {
+            0 => Some(t.panes[0].clone()),
+            1 if t.dual.get() => Some(t.panes[1].clone()),
+            _ => None,
+        }
+    }
+
+    /// Ouvre un onglet sur `path` (et `second` pour le volet droit, si double volet).
+    fn open_tab(self: &Rc<Self>, path: PathBuf, second: Option<PathBuf>, dual: bool, activate: bool) {
+        let tab = Rc::new(Tab {
+            panes: [self.new_pane(), self.new_pane()],
+            dual: Cell::new(dual),
+            focus: Cell::new(0),
+        });
+        tab.panes[0].navigate(path, true, Vec::new());
+        if let Some(p) = second {
+            tab.panes[1].navigate(p, true, Vec::new());
+        }
+        let index = {
+            let mut tabs = self.tabs.borrow_mut();
+            let at = (self.active_tab.get() + 1).min(tabs.len());
+            tabs.insert(at, tab);
+            at
         };
-        self.model.icon_loader().next_generation();
-        *self.type_ahead.borrow_mut() = TypeAhead::default();
-        self.ui.set_filter_text(SharedString::new());
-        self.ui.set_error_text(SharedString::new());
-        self.ui.set_loading(true);
-        self.ui.set_address_editing(false);
-        self.update_nav_ui(&path);
-        self.nav_start.set(Instant::now());
-        self.timing.set(NavTiming::default());
-        tracing::debug!(path = %path.display(), generation, "navigation");
-        let sink: Sink = Arc::new(|ev| post(move |a| a.on_load_event(ev)));
-        // La surveillance démarre sur le thread de listing, avant le listing : aucun
-        // changement n'est perdu, et l'ouverture d'un dossier réseau ne bloque jamais l'interface.
-        let watch: fx_core::source::WatchSink =
-            Box::new(move |events| post(move |a| a.on_fs_events(generation, events)));
-        self.loader.load(path, generation, spec, sink, Some(watch));
-        // Dossier qui ne répond pas (partage réseau injoignable) : abandon après le délai.
-        let timeout = self.network_timeout;
-        slint::Timer::single_shot(timeout, move || {
+        if activate || self.tabs.borrow().len() == 1 {
+            self.activate_tab(index);
+        } else {
+            self.refresh_tabs_ui();
+        }
+    }
+
+    fn new_tab_here(self: &Rc<Self>) {
+        let path = self
+            .active_pane()
+            .current_path()
+            .unwrap_or_else(|| PathBuf::from(r"C:\"));
+        self.open_tab(path, None, false, true);
+    }
+
+    fn activate_tab(self: &Rc<Self>, index: usize) {
+        if index >= self.tabs.borrow().len() {
+            return;
+        }
+        let old = self.active_tab();
+        if self.active_tab.get() != index || old.panes[0].slot.get().is_none() {
+            for p in &old.panes {
+                p.unbind();
+            }
+            self.active_tab.set(index);
+        }
+        self.show_tab();
+    }
+
+    /// Rattache les volets de l'onglet actif aux emplacements de la fenêtre.
+    fn show_tab(self: &Rc<Self>) {
+        let t = self.active_tab();
+        let dual = t.dual.get();
+        if dual && t.panes[1].current_path().is_none() {
+            // Premier passage en double volet : le volet droit s'ouvre sur le même dossier.
+            if let Some(p) = t.panes[0].current_path() {
+                t.panes[1].navigate(p, true, Vec::new());
+            }
+        }
+        if !dual {
+            t.focus.set(0);
+            t.panes[1].unbind();
+        }
+        t.panes[0].bind(0);
+        if dual {
+            t.panes[1].bind(1);
+        }
+        self.ui.set_dual(dual);
+        self.ui.set_active_pane(t.focus.get() as i32);
+        let active = self.active_pane();
+        active.sync_global();
+        self.refresh_tabs_ui();
+        self.update_preview();
+        let id = active.id;
+        slint::Timer::single_shot(Duration::ZERO, move || with_pane(id, |p| p.ui_focus_list()));
+    }
+
+    fn set_active_pane(self: &Rc<Self>, slot: usize) {
+        let t = self.active_tab();
+        if !t.dual.get() || t.focus.get() == slot {
+            return;
+        }
+        t.focus.set(slot);
+        self.ui.set_active_pane(slot as i32);
+        self.active_pane().sync_global();
+        self.update_preview();
+    }
+
+    fn toggle_dual(self: &Rc<Self>) {
+        let t = self.active_tab();
+        t.dual.set(!t.dual.get());
+        self.show_tab();
+        self.schedule_session_save();
+    }
+
+    fn switch_pane(self: &Rc<Self>) {
+        let t = self.active_tab();
+        if t.dual.get() {
+            let slot = 1 - t.focus.get();
+            self.set_active_pane(slot);
+            t.panes[slot].ui_focus_list();
+        }
+    }
+
+    fn close_tab(self: &Rc<Self>, index: usize) {
+        let len = self.tabs.borrow().len();
+        if index >= len {
+            return;
+        }
+        if len == 1 {
+            // Dernier onglet : on ferme la fenêtre, comme l'Explorateur.
+            self.save_session();
+            let _ = slint::quit_event_loop();
+            return;
+        }
+        let tab = self.tabs.borrow_mut().remove(index);
+        for p in &tab.panes {
+            p.unbind();
+            p.loader.cancel();
+        }
+        self.closed_tabs.borrow_mut().push(ClosedTab {
+            paths: [tab.panes[0].current_path(), tab.panes[1].current_path()],
+            dual: tab.dual.get(),
+        });
+        let active = self.active_tab.get();
+        let new_active = if index < active || active >= len - 1 {
+            active.saturating_sub(1)
+        } else {
+            active
+        };
+        self.active_tab.set(new_active.min(len - 2));
+        // L'onglet affiché a changé : on force le rattachement.
+        for p in self.active_tab().panes.iter() {
+            p.unbind();
+        }
+        self.show_tab();
+        self.schedule_session_save();
+    }
+
+    fn reopen_closed_tab(self: &Rc<Self>) {
+        let Some(c) = self.closed_tabs.borrow_mut().pop() else {
+            return;
+        };
+        let [first, second] = c.paths;
+        if let Some(p) = first {
+            self.open_tab(p, second, c.dual, true);
+        }
+    }
+
+    fn cycle_tab(self: &Rc<Self>, delta: isize) {
+        let len = self.tabs.borrow().len() as isize;
+        if len > 1 {
+            let i = (self.active_tab.get() as isize + delta).rem_euclid(len) as usize;
+            self.activate_tab(i);
+        }
+    }
+
+    fn refresh_tabs_ui(&self) {
+        let active = self.active_tab.get();
+        let items: Vec<TabItem> = self
+            .tabs
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let p = &t.panes[if t.dual.get() { t.focus.get() } else { 0 }];
+                let title = p
+                    .current_path()
+                    .map(|path| {
+                        let shown = fx_win::path::display_form(&path);
+                        shown
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| shown.display().to_string())
+                    })
+                    .unwrap_or_default();
+                TabItem {
+                    title: title.into(),
+                    active: i == active,
+                }
+            })
+            .collect();
+        self.ui.set_tabs(ModelRc::new(VecModel::from(items)));
+    }
+
+    /// Un volet a changé de dossier : titres d'onglets et session.
+    pub(crate) fn on_pane_location_changed(self: &Rc<Self>) {
+        self.refresh_tabs_ui();
+        self.schedule_session_save();
+    }
+
+    // ------------------------------------------------------------------ session
+
+    fn session_file(&self) -> Option<PathBuf> {
+        self.data_dir.as_ref().map(|d| d.join("session.txt"))
+    }
+
+    fn schedule_session_save(self: &Rc<Self>) {
+        let seq = self.session_seq.get() + 1;
+        self.session_seq.set(seq);
+        slint::Timer::single_shot(Duration::from_secs(1), move || {
             with_app(|a| {
-                let waiting = a.generation.get() == generation
-                    && a.timing.get().first_rows.is_none()
-                    && !a.st.borrow().complete;
-                if waiting {
-                    a.cancel_loading(format!(
-                        "Cet emplacement ne répond pas (aucune réponse après {} s). Appuyez sur F5 pour réessayer.",
-                        timeout.as_secs()
-                    ));
+                if a.session_seq.get() == seq {
+                    a.save_session();
                 }
             })
         });
     }
 
-    /// Abandonne le chargement en cours (Échap, délai dépassé), y compris une E/S bloquée.
-    fn cancel_loading(self: &Rc<Self>, message: String) {
-        if self.st.borrow().complete {
+    /// Format texte, une ligne par onglet : `onglet\t<double>\t<volet actif>\t<chemin>\t<chemin>`
+    /// (la tabulation est interdite dans les chemins Windows).
+    fn save_session(&self) {
+        if self.bench.borrow().is_some() {
             return;
         }
-        self.loader.cancel();
-        // Les résultats éventuels de ce chargement seront ignorés.
-        self.generation.set(self.generation.get() + 1);
-        {
-            let mut st = self.st.borrow_mut();
-            st.complete = true;
-            st.folder = None;
-            st.watcher = None;
-            st.queued.clear();
+        let Some(file) = self.session_file() else { return };
+        let mut out = format!("windir-session 1\nactif\t{}\n", self.active_tab.get());
+        for t in self.tabs.borrow().iter() {
+            let path = |p: &Pane| {
+                p.current_path()
+                    .map(|x| x.display().to_string())
+                    .unwrap_or_default()
+            };
+            out += &format!(
+                "onglet\t{}\t{}\t{}\t{}\n",
+                t.dual.get() as u8,
+                t.focus.get(),
+                path(&t.panes[0]),
+                path(&t.panes[1])
+            );
         }
-        tracing::info!("chargement abandonné : {message}");
-        self.model.clear();
-        self.ui.set_loading(false);
-        self.ui.set_error_text(message.into());
-        self.ui.set_status(SharedString::new());
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(&file, out) {
+            tracing::warn!("session non enregistrée : {e}");
+        }
     }
 
-    fn toggle_hidden(self: &Rc<Self>) {
-        let show = !self.show_hidden.get();
-        self.show_hidden.set(show);
-        {
-            let mut st = self.st.borrow_mut();
-            st.filter = st.filter.clone().with_hidden(show);
-            st.view_version += 1;
-        }
-        self.recompute_view(false);
-        self.flash_status(
-            if show {
-                "Éléments masqués affichés"
-            } else {
-                "Éléments masqués cachés"
+    fn restore_session(self: &Rc<Self>) -> bool {
+        let Some(text) = self.session_file().and_then(|f| std::fs::read_to_string(f).ok()) else {
+            return false;
+        };
+        let mut active = 0usize;
+        let mut count = 0;
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            match parts.as_slice() {
+                ["actif", i] => active = i.parse().unwrap_or(0),
+                ["onglet", dual, focus, p0, p1] if !p0.is_empty() => {
+                    let second = (!p1.is_empty()).then(|| PathBuf::from(p1));
+                    self.open_tab(PathBuf::from(p0), second, *dual == "1", false);
+                    if let Some(t) = self.tabs.borrow().last() {
+                        t.focus.set(focus.parse::<usize>().unwrap_or(0).min(1));
+                    }
+                    count += 1;
+                }
+                _ => {}
             }
-            .into(),
-        );
+        }
+        if count == 0 {
+            return false;
+        }
+        // `open_tab` insère après l'onglet actif : on remet l'ordre d'origine.
+        self.active_tab.set(0);
+        self.activate_tab(active.min(count - 1));
+        true
     }
 
-    fn update_nav_ui(&self, path: &Path) {
-        let shown = fx_win::path::display_form(path);
-        self.ui.set_address(shown.display().to_string().into());
-        let title = shown
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| shown.display().to_string());
-        self.ui.set_folder_title(title.into());
-        {
-            let h = self.history.borrow();
-            self.ui.set_can_back(h.can_go_back());
-            self.ui.set_can_forward(h.can_go_forward());
-        }
-        self.ui.set_can_up(parent_of(path).is_some());
-        let crumbs: Vec<Crumb> = crate::nav::crumbs(path, &self.drive_labels.borrow())
-            .into_iter()
-            .map(|(label, p)| Crumb {
-                label: label.into(),
-                path: p.display().to_string().into(),
-            })
-            .collect();
-        self.ui.set_crumbs(ModelRc::new(VecModel::from(crumbs)));
-        self.refresh_nav_items(path);
-    }
+    // ------------------------------------------------------------------ volet de navigation
 
     fn set_nav(self: &Rc<Self>, entries: Vec<NavEntry>) {
         {
@@ -481,46 +784,43 @@ impl App {
             }
         }
         *self.nav_entries.borrow_mut() = entries;
-        if let Some(cur) = self.current_path() {
-            self.update_nav_ui(&cur);
-        }
+        self.active_pane().sync_global();
     }
 
-    fn refresh_nav_items(&self, current: &Path) {
-        let items: Vec<NavItem> = self
-            .nav_entries
-            .borrow()
-            .iter()
-            .map(|e| NavItem {
-                label: e.label.clone().into(),
-                glyph: e.glyph.into(),
-                path: e.path.display().to_string().into(),
-                header: e.header,
-                current: !e.header && same_path(&e.path, current),
-            })
-            .collect();
-        self.ui.set_nav_items(ModelRc::new(VecModel::from(items)));
-    }
-
-    fn navigate_to(self: &Rc<Self>, text: &str) {
-        let t = text.trim().trim_matches('"');
-        self.ui.set_suggestions(ModelRc::default());
-        if t.is_empty() {
-            if let Some(cur) = self.current_path() {
-                self.update_nav_ui(&cur);
+    pub(crate) fn refresh_nav_items(&self, current: &Path) {
+        let mut items: Vec<NavItem> = Vec::new();
+        let favorites = self.favorites.borrow();
+        if !favorites.is_empty() {
+            items.push(NavItem {
+                label: "Favoris".into(),
+                glyph: "".into(),
+                path: "".into(),
+                header: true,
+                current: false,
+            });
+            for f in favorites.iter() {
+                let shown = fx_win::path::display_form(f);
+                let label = shown
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| shown.display().to_string());
+                items.push(NavItem {
+                    label: label.into(),
+                    glyph: "\u{E734}".into(),
+                    path: f.display().to_string().into(),
+                    header: false,
+                    current: same_path(f, current),
+                });
             }
-            return;
         }
-        let path = std::path::absolute(t).unwrap_or_else(|_| PathBuf::from(t));
-        if self
-            .current_path()
-            .as_deref()
-            .is_some_and(|c| same_path(c, &path))
-        {
-            self.refresh();
-        } else {
-            self.navigate(path, true, Vec::new());
-        }
+        items.extend(self.nav_entries.borrow().iter().map(|e| NavItem {
+            label: e.label.clone().into(),
+            glyph: e.glyph.into(),
+            path: e.path.display().to_string().into(),
+            header: e.header,
+            current: !e.header && same_path(&e.path, current),
+        }));
+        self.ui.set_nav_items(ModelRc::new(VecModel::from(items)));
     }
 
     fn address_edited(self: &Rc<Self>, text: String) {
@@ -539,966 +839,364 @@ impl App {
             });
     }
 
-    fn go_back(self: &Rc<Self>) {
-        let p = self.history.borrow_mut().go_back().map(Path::to_path_buf);
-        if let Some(p) = p {
-            self.navigate(p, false, Vec::new());
+    pub(crate) fn toggle_hidden(self: &Rc<Self>) {
+        let show = !self.show_hidden.get();
+        self.show_hidden.set(show);
+        for p in self.all_panes() {
+            p.set_show_hidden(show);
         }
-    }
-
-    fn go_forward(self: &Rc<Self>) {
-        let p = self.history.borrow_mut().go_forward().map(Path::to_path_buf);
-        if let Some(p) = p {
-            self.navigate(p, false, Vec::new());
-        }
-    }
-
-    fn go_up(self: &Rc<Self>) {
-        let Some(cur) = self.current_path() else { return };
-        if let Some(parent) = parent_of(&cur) {
-            // Comme l'Explorateur : on resélectionne le dossier d'où l'on vient.
-            let select = cur.file_name().map(wide).into_iter().collect();
-            self.navigate(parent, true, select);
-        }
-    }
-
-    fn refresh(self: &Rc<Self>) {
-        let Some(cur) = self.current_path() else { return };
-        let select = self.selected_names();
-        self.navigate(cur, false, select);
-    }
-
-    // ------------------------------------------------------------------ résultats du chargeur
-
-    fn on_load_event(self: &Rc<Self>, ev: LoadEvent) {
-        match ev {
-            LoadEvent::Partial {
-                generation,
-                folder,
-                order,
-                ..
-            } => {
-                if generation != self.generation.get() || self.st.borrow().complete {
-                    return;
-                }
-                let filter = {
-                    let mut st = self.st.borrow_mut();
-                    st.folder = Some(folder.clone());
-                    st.filter.clone()
-                };
-                let len = folder.len();
-                let visible = if filter.is_identity() {
-                    order
-                } else {
-                    filter.apply(&folder, &order)
-                };
-                self.model.set_view(Some(folder), visible, Selection::new(len));
-                self.mark_rows(false);
-                self.update_status();
+        self.active_pane().flash_status(
+            if show {
+                "Éléments masqués affichés"
+            } else {
+                "Éléments masqués cachés"
             }
-            LoadEvent::Complete {
-                generation,
-                folder,
-                keys,
-                order,
-                stats,
-                watcher,
-            } => {
-                if generation != self.generation.get() {
-                    return;
-                }
-                let (filter, needs_resort) = {
-                    let mut st = self.st.borrow_mut();
-                    st.folder = Some(folder.clone());
-                    st.keys = Some(keys);
-                    st.complete = true;
-                    st.watcher = watcher;
-                    st.order = Arc::new(order.clone());
-                    (st.filter.clone(), st.spec != st.load_spec)
-                };
-                let visible = if filter.is_identity() {
-                    order
-                } else {
-                    filter.apply(&folder, &order)
-                };
-                let mut sel = Selection::new(folder.len());
-                let pending = self.take_pending(&folder);
-                if let Some((found, _)) = &pending {
-                    sel.select_only(found);
-                }
-                self.model.set_view(Some(folder), visible, sel);
-                self.ui.set_loading(false);
-                let mut t = self.timing.get();
-                t.stats = stats;
-                self.timing.set(t);
-                self.mark_rows(true);
-                self.after_pending(pending);
-                if needs_resort {
-                    self.recompute_view(needs_resort);
-                }
-                self.update_status();
-                self.flush_queued();
-            }
-            LoadEvent::Failed { generation, error } => {
-                if generation != self.generation.get() {
-                    return;
-                }
-                tracing::info!(kind = ?error.kind, "{error}");
-                {
-                    let mut st = self.st.borrow_mut();
-                    st.folder = None;
-                    st.keys = None;
-                    st.order = Arc::default();
-                    st.complete = true;
-                    st.watcher = None;
-                    st.queued.clear();
-                }
-                self.model.clear();
-                self.ui.set_loading(false);
-                self.ui.set_error_text(error.user_message().into());
-                self.ui.set_status(SharedString::new());
-                self.mark_rows(true);
-            }
-        }
+            .into(),
+        );
     }
 
-    /// Entrées attendues (par nom) présentes dans `folder` : retirées de l'attente.
-    fn take_pending(&self, folder: &Folder) -> Option<(Vec<u32>, bool)> {
-        let mut st = self.st.borrow_mut();
-        if st.pending_select.is_empty() {
-            return None;
-        }
-        let wanted: HashSet<&[u16]> = st.pending_select.iter().map(Vec::as_slice).collect();
-        let found: Vec<u32> = (0..folder.len() as u32)
-            .filter(|&i| wanted.contains(folder.name(i)))
-            .collect();
-        if found.is_empty() {
-            if st
-                .pending_since
-                .is_none_or(|t| t.elapsed() > PENDING_SELECT_TIMEOUT)
-            {
-                st.pending_select.clear();
-                st.pending_rename = false;
-            }
-            return None;
-        }
-        st.pending_select.clear();
-        st.pending_since = None;
-        let rename = std::mem::take(&mut st.pending_rename);
-        Some((found, rename))
-    }
-
-    fn after_pending(self: &Rc<Self>, pending: Option<(Vec<u32>, bool)>) {
-        let Some((found, rename)) = pending else { return };
-        if let Some(row) = found.first().and_then(|&e| self.model.row_of(e)) {
-            self.ui.invoke_scroll_to_row(row as i32);
-        }
-        if rename {
-            self.begin_rename();
-        }
-    }
-
-    // ------------------------------------------------------------------ surveillance
-
-    fn on_fs_events(self: &Rc<Self>, generation: u64, events: Vec<FsEvent>) {
-        if generation != self.generation.get() {
-            return;
-        }
-        let defer = {
-            let mut st = self.st.borrow_mut();
-            let defer = !st.complete || st.applying || st.rename_entry.is_some();
-            if defer {
-                st.queued.extend(events.iter().cloned());
-            }
-            defer
-        };
-        if !defer {
-            self.start_apply(events);
-        }
-    }
-
-    fn flush_queued(self: &Rc<Self>) {
-        let events = {
-            let mut st = self.st.borrow_mut();
-            if !st.complete || st.applying || st.rename_entry.is_some() || st.queued.is_empty() {
-                return;
-            }
-            std::mem::take(&mut st.queued)
-        };
-        self.start_apply(events);
-    }
-
-    fn start_apply(self: &Rc<Self>, events: Vec<FsEvent>) {
-        let (folder, spec, filter) = {
-            let mut st = self.st.borrow_mut();
-            let Some(folder) = st.folder.clone() else { return };
-            st.applying = true;
-            st.apply_version = st.view_version;
-            (folder, st.spec, st.filter.clone())
-        };
-        let generation = self.generation.get();
-        self.loader
-            .apply_events(folder, events, spec, filter, generation, |r| {
-                post(move |a| a.on_applied(r))
-            });
-    }
-
-    fn on_applied(self: &Rc<Self>, r: ApplyResult) {
-        if r.generation != self.generation.get() {
-            return;
-        }
-        self.st.borrow_mut().applying = false;
-        if r.reload {
-            self.refresh();
-            return;
-        }
-        // Les recalculs de vue en cours portaient sur l'ancien dossier : on les invalide.
-        self.view_seq.set(self.view_seq.get() + 1);
-        let old_sel = self.model.selection();
-        let old_focus_row = old_sel.focus_row(&self.model.visible());
-        let mut sel = old_sel.remap(r.folder.len(), |e| r.map.get(e as usize).copied().flatten());
-        // Les éléments sélectionnés ont disparu (suppression) : on sélectionne celui qui a pris
-        // leur place, comme l'Explorateur.
-        if sel.is_empty()
-            && !old_sel.is_empty()
-            && let Some(row) = old_focus_row
-            && let Some(&e) = r.visible.get(row.min(r.visible.len().saturating_sub(1)))
-        {
-            sel.select_only(&[e]);
-        }
-        let rename_entry = self.st.borrow().rename_entry;
-        let new_rename = rename_entry.and_then(|e| r.map.get(e as usize).copied().flatten());
-        let needs_view = {
-            let mut st = self.st.borrow_mut();
-            st.folder = Some(r.folder.clone());
-            st.keys = Some(r.keys.clone());
-            st.order = Arc::new(r.order);
-            st.rename_entry = new_rename;
-            st.view_version != st.apply_version
-        };
-        let pending = self.take_pending(&r.folder);
-        if let Some((found, _)) = &pending {
-            sel.select_only(found);
-        }
-        self.model.set_view(Some(r.folder), r.visible, sel);
-        if let Some(e) = new_rename
-            && let Some(row) = self.model.row_of(e)
-        {
-            self.ui.set_rename_row(row as i32);
-        } else if rename_entry.is_some() {
-            self.ui.set_rename_row(-1);
-        }
-        self.after_pending(pending);
-        if needs_view {
-            self.recompute_view(true);
-        }
-        self.update_status();
-        self.flush_queued();
-    }
-
-    // ------------------------------------------------------------------ tri, filtre
-
-    fn recompute_view(self: &Rc<Self>, resort: bool) {
-        let st = self.st.borrow();
-        let (Some(folder), true) = (st.folder.clone(), st.complete) else {
-            return;
-        };
-        let seq = self.view_seq.get() + 1;
-        self.view_seq.set(seq);
-        let generation = self.generation.get();
-        let done = |r: ViewResult| post(move |a| a.on_view(r));
-        match (resort, st.keys.clone()) {
-            (true, Some(keys)) => {
-                self.loader
-                    .compute_view(folder, keys, st.spec, st.filter.clone(), generation, seq, done)
-            }
-            _ => self.loader.filter_view(
-                folder,
-                st.order.clone(),
-                st.spec,
-                st.filter.clone(),
-                generation,
-                seq,
-                done,
-            ),
-        }
-    }
-
-    fn on_view(self: &Rc<Self>, r: ViewResult) {
-        if r.generation != self.generation.get() || r.seq != self.view_seq.get() {
-            return;
-        }
-        if let Some(order) = r.order {
-            let mut st = self.st.borrow_mut();
-            st.order = Arc::new(order);
-            st.load_spec = r.spec;
-        }
-        self.model.set_visible(r.visible);
-        if let Some(row) = self.model.selection().focus_row(&self.model.visible()) {
-            self.ui.invoke_scroll_to_row(row as i32);
-        }
-        self.update_status();
-    }
-
-    fn sort_by(self: &Rc<Self>, column: i32) {
-        let column = match column {
-            1 => SortColumn::Modified,
-            2 => SortColumn::Type,
-            3 => SortColumn::Size,
-            _ => SortColumn::Name,
-        };
-        let spec = {
-            let mut st = self.st.borrow_mut();
-            st.spec = st.spec.clicked(column);
-            st.view_version += 1;
-            st.spec
-        };
-        self.ui.set_sort_column(column_index(spec.column));
-        self.ui.set_sort_descending(spec.descending);
-        self.recompute_view(true);
-    }
-
-    fn filter_edited(self: &Rc<Self>, text: &str) {
-        {
-            let mut st = self.st.borrow_mut();
-            st.filter = Filter::new(text).with_hidden(self.show_hidden.get());
-            st.view_version += 1;
-        }
-        self.recompute_view(false);
-    }
-
-    // ------------------------------------------------------------------ sélection, souris
-
-    fn selected_paths(&self) -> Vec<PathBuf> {
-        let Some(folder) = self.model.folder() else {
-            return Vec::new();
-        };
-        self.model
-            .selected()
-            .into_iter()
-            .map(|e| folder.child_path(e))
-            .collect()
-    }
-
-    fn selected_names(&self) -> Vec<Vec<u16>> {
-        let Some(folder) = self.model.folder() else {
-            return Vec::new();
-        };
-        self.model
-            .selected()
-            .into_iter()
-            .map(|e| folder.name(e).to_vec())
-            .collect()
-    }
-
-    fn row_pointer(self: &Rc<Self>, row: i32, kind: i32, ctrl: bool, shift: bool, on_name: bool) {
-        let Ok(row) = usize::try_from(row) else { return };
-        match kind {
-            0 => {
-                let already = self
-                    .model
-                    .entry_at(row)
-                    .is_some_and(|e| self.model.selection().is_selected(e));
-                let base = (!on_name && ctrl).then(|| self.model.selection());
-                {
-                    let mut st = self.st.borrow_mut();
-                    st.dragging = false;
-                    st.marquee_base = base;
-                    st.press_deferred = (already && !ctrl && !shift).then_some(row);
-                }
-                if !(already && !ctrl && !shift) {
-                    self.model.update_selection(|s, v| s.click(v, row, ctrl, shift));
-                    self.update_status();
-                }
-            }
-            1 => {
-                let deferred = {
-                    let mut st = self.st.borrow_mut();
-                    let d = if st.dragging { None } else { st.press_deferred };
-                    st.press_deferred = None;
-                    st.dragging = false;
-                    d
-                };
-                if let Some(r) = deferred {
-                    self.model.update_selection(|s, v| s.click(v, r, false, false));
-                    self.update_status();
-                }
-            }
-            2 => self.open_selection(),
-            3 => {
-                self.model.update_selection(|s, v| s.right_click(v, row));
-                self.update_status();
-                let (x, y) = fx_win::shell::cursor_pos();
-                self.show_menu(false, x, y);
-            }
-            _ => {}
-        }
-    }
-
-    fn background_pointer(self: &Rc<Self>, kind: i32, ctrl: bool, _shift: bool) {
-        match kind {
-            0 => {
-                let base = ctrl.then(|| self.model.selection());
-                self.st.borrow_mut().marquee_base = base;
-                if !ctrl {
-                    self.model.update_selection(|s, _| s.clear());
-                    self.update_status();
-                }
-            }
-            3 => {
-                self.model.update_selection(|s, _| s.clear());
-                self.update_status();
-                let (x, y) = fx_win::shell::cursor_pos();
-                self.show_menu(true, x, y);
-            }
-            _ => {}
-        }
-    }
-
-    fn marquee_changed(self: &Rc<Self>, a: i32, b: i32, _ctrl: bool) {
-        let base = {
-            let mut st = self.st.borrow_mut();
-            st.press_deferred = None;
-            st.marquee_base.clone()
-        };
-        let (a, b) = (a.max(0) as usize, b.max(0) as usize);
-        self.model
-            .update_selection(|s, v| s.rectangle(v, a, b, base.as_ref()));
-        self.update_status();
-    }
-
-    fn drag_out(self: &Rc<Self>, row: i32) {
-        let Ok(row) = usize::try_from(row) else { return };
-        if self.st.borrow().rename_entry.is_some() {
-            return;
-        }
-        {
-            let mut st = self.st.borrow_mut();
-            st.press_deferred = None;
-            st.dragging = true;
-        }
-        if self
-            .model
-            .entry_at(row)
-            .is_some_and(|e| !self.model.selection().is_selected(e))
-        {
-            self.model.update_selection(|s, v| s.click(v, row, false, false));
-        }
-        let paths = self.selected_paths();
-        let Some(hwnd) = self.hwnd.get() else { return };
-        if paths.is_empty() {
-            return;
-        }
-        // Boucle modale d'OLE sur le thread d'interface (exigence d'OLE pour la source).
-        if let Err(e) = fx_win::dragdrop::drag_files(hwnd, &paths) {
-            tracing::warn!("glisser-déposer : {e}");
-        }
-        // OLE a capturé la souris : Slint n'a pas vu le relâchement du bouton.
-        let _ = self
-            .ui
-            .window()
-            .dispatch_event_with_result(SlintEvent::PointerReleased {
-                position: LogicalPosition::new(0.0, 0.0),
-                button: PointerEventButton::Left,
-            });
-        self.ui.set_drop_row(-1);
-    }
+    // ------------------------------------------------------------------ glisser-déposer
 
     fn drop_hover(self: &Rc<Self>, x: i32, y: i32) -> Option<PathBuf> {
         let scale = self.ui.window().scale_factor();
-        let row = self.ui.invoke_row_at(x as f32 / scale, y as f32 / scale);
-        let folder = self.model.folder();
-        if let (Ok(r), Some(folder)) = (usize::try_from(row), &folder)
-            && let Some(e) = self.model.entry_at(r)
-            && folder.entry(e).is_some_and(|en| en.is_dir())
-        {
-            self.ui.set_drop_row(row);
-            return Some(folder.child_path(e));
+        let (lx, ly) = (x as f32 / scale, y as f32 / scale);
+        let slot = self.ui.invoke_pane_at(lx, ly);
+        let target = self.pane_in_slot(slot);
+        // Efface la surbrillance de l'autre volet.
+        for p in self.active_tab().panes.iter() {
+            if target.as_ref().is_none_or(|t| t.id != p.id) {
+                p.ui_drop_row(-1);
+            }
         }
-        self.ui.set_drop_row(-1);
-        let st = self.st.borrow();
-        if st.complete && st.folder.is_some() {
-            self.current_path()
-        } else {
-            None
-        }
+        let pane = target?;
+        self.drop_pane.set(Some(pane.id));
+        let row = self.ui.invoke_row_at(slot, lx, ly);
+        pane.drop_hover(row)
     }
 
-    fn drop_files(self: &Rc<Self>, dest: PathBuf, paths: Vec<PathBuf>, effect: u32) {
-        self.ui.set_drop_row(-1);
-        if paths.is_empty() {
-            return;
+    fn drop_leave(&self) {
+        self.drop_pane.set(None);
+        for p in self.active_tab().panes.iter() {
+            p.ui_drop_row(-1);
         }
-        let is_move = effect == fx_win::dragdrop::EFFECT_MOVE;
-        let what = if is_move { "Déplacement" } else { "Copie" };
-        self.run_job(
-            Job::Drop {
-                items: paths,
-                dest,
-                is_move,
-            },
-            what,
-        );
     }
 
     // ------------------------------------------------------------------ clavier
 
-    fn on_key(self: &Rc<Self>, text: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
-        if self.st.borrow().rename_entry.is_some() {
+    fn on_key(self: &Rc<Self>, slot: i32, text: &str, ctrl: bool, shift: bool, alt: bool) -> bool {
+        let pane = self.pane_in_slot(slot).unwrap_or_else(|| self.active_pane());
+        if pane.st.borrow().rename_entry.is_some() {
             return false;
         }
         let Some(mut c) = text.chars().next() else {
             return false;
         };
-        // Ctrl+lettre peut arriver comme caractère de contrôle (0x01 = A).
         if ctrl && ('\u{1}'..='\u{1a}').contains(&c) {
             c = (b'a' + (c as u8 - 1)) as char;
         }
         let is = |k: Key| c == char::from(k);
-        if alt {
-            if is(Key::LeftArrow) {
-                self.go_back();
-            } else if is(Key::RightArrow) {
-                self.go_forward();
-            } else if is(Key::UpArrow) {
-                self.go_up();
-            } else {
-                return false;
+        let dual = self.active_tab().dual.get();
+        let lower = c.to_ascii_lowercase();
+        let cmd = if ctrl && !alt {
+            match lower {
+                't' if shift => Some(Cmd::ReopenTab),
+                't' => Some(Cmd::NewTab),
+                'w' => Some(Cmd::CloseTab),
+                '\t' => {
+                    self.cycle_tab(if shift { -1 } else { 1 });
+                    return true;
+                }
+                'r' => Some(Cmd::Refresh),
+                'd' => Some(Cmd::AddFavorite),
+                'c' if shift => Some(Cmd::CopyPath),
+                's' if shift => Some(Cmd::FolderSize),
+                '`' if shift => Some(Cmd::OpenTerminal),
+                _ => None,
             }
+        } else if alt && !ctrl {
+            if lower == 'p' {
+                Some(Cmd::TogglePreview)
+            } else if is(Key::Return) {
+                Some(Cmd::Properties)
+            } else {
+                None
+            }
+        } else if is(Key::F6) && !shift {
+            Some(Cmd::ToggleDual)
+        } else if dual && is(Key::Tab) && !shift {
+            Some(Cmd::SwitchPane)
+        } else if dual && is(Key::F5) {
+            Some(if shift { Cmd::MoveToOther } else { Cmd::CopyToOther })
+        } else {
+            None
+        };
+        if let Some(cmd) = cmd {
+            self.run_cmd(cmd);
             return true;
         }
-        if is(Key::Escape) && !self.st.borrow().complete {
-            self.cancel_loading("Chargement annulé. Appuyez sur F5 pour réessayer.".into());
-        } else if is(Key::F5) {
-            self.refresh();
-        } else if is(Key::F2) {
-            self.begin_rename();
-        } else if is(Key::Delete) {
-            self.delete_selection(shift);
-        } else if is(Key::Menu) || (shift && is(Key::F10)) {
-            self.keyboard_menu();
-        } else if is(Key::Return) {
-            self.open_selection();
-        } else if is(Key::Backspace) {
-            self.go_up();
-        } else if ctrl
-            && !is(Key::UpArrow)
-            && !is(Key::DownArrow)
-            && !is(Key::PageUp)
-            && !is(Key::PageDown)
-            && !is(Key::Home)
-            && !is(Key::End)
-        {
-            match c.to_ascii_lowercase() {
-                'a' => {
-                    self.model.update_selection(|s, v| s.select_all(v));
-                    self.update_status();
-                }
-                'c' => self.clipboard_set(false),
-                'x' => self.clipboard_set(true),
-                'v' => self.paste(),
-                'n' if shift => self.new_folder(),
-                'h' => self.toggle_hidden(),
-                ' ' => {
-                    self.model.update_selection(|s, _| s.toggle_focus());
-                    self.update_status();
-                }
-                _ => return false,
-            }
-        } else if let Some(target) = self.nav_target(c) {
-            if let Some(row) = target {
-                self.model.update_selection(|s, v| s.move_to(v, row, ctrl, shift));
-                self.ui.invoke_scroll_to_row(row as i32);
-                self.update_status();
-            }
-        } else if !c.is_control() && (c as u32) < 0xF700 && !ctrl {
-            // Saisie au clavier : saute à l'élément dont le nom commence par le texte tapé.
-            let Some(folder) = self.model.folder() else {
-                return true;
-            };
-            let visible = self.model.visible();
-            let current = self.model.selection().focus_row(&visible);
-            let row = self
-                .type_ahead
-                .borrow_mut()
-                .push(c, Instant::now(), visible.len(), current, |r| {
-                    folder.display_name(visible[r])
-                });
-            if let Some(row) = row {
-                self.model
-                    .update_selection(|s, v| s.move_to(v, row, false, false));
-                self.ui.invoke_scroll_to_row(row as i32);
-                self.update_status();
-            }
-        } else {
-            return false;
-        }
-        true
-    }
-
-    /// Ligne cible d'une touche de déplacement (`Some(None)` : touche reconnue, liste vide).
-    fn nav_target(&self, c: char) -> Option<Option<usize>> {
-        let is = |k: Key| c == char::from(k);
-        let len = self.model.len();
-        let cur = self.model.selection().focus_row(&self.model.visible());
-        let page = self.ui.get_page_rows().max(1) as usize;
-        let last = len.saturating_sub(1);
-        let target = if is(Key::DownArrow) {
-            cur.map_or(0, |r| (r + 1).min(last))
-        } else if is(Key::UpArrow) {
-            cur.map_or(0, |r| r.saturating_sub(1))
-        } else if is(Key::PageDown) {
-            cur.map_or(0, |r| (r + page).min(last))
-        } else if is(Key::PageUp) {
-            cur.map_or(0, |r| r.saturating_sub(page))
-        } else if is(Key::Home) {
-            0
-        } else if is(Key::End) {
-            last
-        } else {
-            return None;
-        };
-        Some((len > 0).then_some(target))
+        pane.on_key(text, ctrl, shift, alt)
     }
 
     // ------------------------------------------------------------------ commandes
 
-    fn host_post(&self, job: impl FnOnce(&fx_win::shell_host::HostCtx) + Send + 'static) {
-        match &self.host {
-            Some(h) if h.post(job) => {}
-            _ => self.flash_status("Le service Shell est indisponible.".into()),
-        }
-    }
-
-    fn open_selection(self: &Rc<Self>) {
-        let Some(folder) = self.model.folder() else { return };
-        let sel = self.model.selected();
-        if let [single] = sel[..]
-            && folder.entry(single).is_some_and(|e| e.is_dir())
-        {
-            self.navigate(folder.child_path(single), true, Vec::new());
-            return;
-        }
-        let owner = self.hwnd.get();
-        let files: Vec<PathBuf> = sel
+    fn palette_filter(&self, query: &str) {
+        let q = query.trim().to_lowercase();
+        let matches: Vec<Cmd> = COMMANDS
             .iter()
-            .filter(|&&e| folder.entry(e).is_some_and(|en| !en.is_dir()))
-            .take(16)
-            .map(|&e| folder.child_path(e))
+            .filter(|(_, label, _)| q.split_whitespace().all(|w| label.to_lowercase().contains(w)))
+            .map(|(c, _, _)| *c)
             .collect();
-        for path in files {
-            self.host_post(move |_| {
-                if let Err(e) = fx_win::shell::open(&path, owner) {
-                    let msg = format!("Impossible d'ouvrir « {} » : {}", path.display(), e.message());
-                    post(move |a| a.flash_status(msg));
-                }
-            });
-        }
-    }
-
-    fn show_menu(self: &Rc<Self>, background: bool, x: i32, y: i32) {
-        let Some(folder_path) = self.current_path() else {
-            return;
-        };
-        let items = if background {
-            Vec::new()
-        } else {
-            self.selected_paths()
-        };
-        if !background && items.is_empty() {
-            return;
-        }
-        let owner = self.hwnd.get().unwrap_or(0);
-        self.host_post(move |ctx| {
-            let opts = MenuOptions {
-                x,
-                y,
-                owner,
-                auto_dismiss_ms: None,
-            };
-            let r = fx_win::context_menu::show(ctx, &folder_path, &items, opts).map_err(|e| e.message());
-            post(move |a| a.on_menu_done(r));
-        });
-    }
-
-    fn keyboard_menu(self: &Rc<Self>) {
-        let visible = self.model.visible();
-        let sel = self.model.selection();
-        let row = sel.focus_row(&visible).filter(|&r| sel.is_selected(visible[r]));
-        let scale = self.ui.window().scale_factor();
-        let lx = self.ui.invoke_row_anchor_x();
-        let ly = match row {
-            Some(r) => self.ui.invoke_row_anchor_y(r as i32),
-            None => self.ui.invoke_row_anchor_y(-1),
-        };
-        let (x, y) = fx_win::shell::client_to_screen(
-            self.hwnd.get().unwrap_or(0),
-            (lx * scale) as i32,
-            (ly * scale) as i32,
-        );
-        self.show_menu(row.is_none(), x, y);
-    }
-
-    fn on_menu_done(self: &Rc<Self>, r: Result<MenuOutcome, String>) {
-        match r {
-            Ok(out) => {
-                tracing::debug!(invoked = ?out.invoked, app = ?out.app_command, "menu contextuel");
-                if out.app_command == Some(AppCommand::Rename) {
-                    self.begin_rename();
-                }
-            }
-            Err(e) => self.flash_status(format!("Menu contextuel : {e}")),
-        }
-    }
-
-    fn begin_rename(self: &Rc<Self>) {
-        let Some(folder) = self.model.folder() else { return };
-        let sel = self.model.selection();
-        let entry = match sel.focus() {
-            Some(f) if sel.is_selected(f) => Some(f),
-            _ => self.model.selected().first().copied(),
-        };
-        let Some(entry) = entry else { return };
-        let Some(row) = self.model.row_of(entry) else {
-            return;
-        };
-        let name = folder.display_name(entry);
-        let is_dir = folder.entry(entry).is_some_and(|e| e.is_dir());
-        // Comme l'Explorateur : l'extension n'est pas présélectionnée.
-        let stem = match name.rfind('.') {
-            Some(dot) if dot > 0 && !is_dir => dot,
-            _ => name.len(),
-        };
-        self.st.borrow_mut().rename_entry = Some(entry);
-        self.ui.invoke_scroll_to_row(row as i32);
-        self.ui.set_rename_text(name.into());
-        self.ui.set_rename_stem(stem as i32);
-        self.ui.set_rename_row(row as i32);
-    }
-
-    fn rename_commit(self: &Rc<Self>, text: &str) {
-        let Some(entry) = self.st.borrow_mut().rename_entry.take() else {
-            return;
-        };
-        self.ui.set_rename_row(-1);
-        self.ui.invoke_focus_list();
-        let folder = self.model.folder();
-        let new_name = text.trim();
-        if let Some(folder) = folder {
-            let old = folder.display_name(entry);
-            if new_name.is_empty() || new_name == old {
-                // rien à faire
-            } else if new_name.contains(INVALID_NAME_CHARS) {
-                self.flash_status("Un nom ne peut pas contenir les caractères \\ / : * ? \" < > |".into());
-            } else {
-                {
-                    let mut st = self.st.borrow_mut();
-                    st.pending_select = vec![new_name.encode_utf16().collect()];
-                    st.pending_since = Some(Instant::now());
-                }
-                let op = FileOp::Rename {
-                    item: folder.child_path(entry),
-                    new_name: OsString::from(new_name),
-                };
-                self.run_job(Job::Op(op), "Renommage");
-            }
-        }
-        self.flush_queued();
-    }
-
-    fn rename_cancel(self: &Rc<Self>) {
-        self.st.borrow_mut().rename_entry = None;
-        self.ui.set_rename_row(-1);
-        self.ui.invoke_focus_list();
-        self.flush_queued();
-    }
-
-    fn delete_selection(self: &Rc<Self>, permanent: bool) {
-        let items = self.selected_paths();
-        if items.is_empty() {
-            return;
-        }
-        // Suppression définitive : Windows demande confirmation (IFileOperation).
-        self.run_job(Job::Op(FileOp::Delete { items, permanent }), "Suppression");
-    }
-
-    fn new_folder(self: &Rc<Self>) {
-        let Some(parent) = self.current_path() else { return };
-        {
-            let mut st = self.st.borrow_mut();
-            st.pending_rename = true;
-            st.pending_select.clear();
-        }
-        let op = FileOp::NewFolder {
-            parent,
-            name: OsString::from("Nouveau dossier"),
-        };
-        self.run_job(Job::Op(op), "Nouveau dossier");
-    }
-
-    fn clipboard_set(self: &Rc<Self>, cut: bool) {
-        let paths = self.selected_paths();
-        if paths.is_empty() {
-            return;
-        }
-        let n = paths.len();
-        self.host_post(move |_| {
-            let r = fx_win::clipboard::set_files(&paths, cut);
-            post(move |a| match r {
-                Ok(()) => {
-                    let verb = if cut { "coupé" } else { "copié" };
-                    let msg = if n == 1 {
-                        format!("1 élément {verb}")
-                    } else {
-                        format!("{n} éléments {verb}s")
-                    };
-                    a.flash_status(msg);
-                }
-                Err(e) => a.flash_status(format!("Presse-papiers : {}", e.message())),
-            });
-        });
-    }
-
-    fn paste(self: &Rc<Self>) {
-        let Some(dest) = self.current_path() else { return };
-        if !fx_win::clipboard::has_files() {
-            self.flash_status("Le presse-papiers ne contient pas de fichiers.".into());
-            return;
-        }
-        self.run_job(Job::Paste { dest }, "Collage");
-    }
-
-    fn run_job(self: &Rc<Self>, job: Job, what: &'static str) {
-        let owner = self.hwnd.get().unwrap_or(0);
-        let generation = self.generation.get();
-        ops::spawn(job, owner, move |r| {
-            post(move |a| a.on_job_done(generation, what, r))
-        });
-    }
-
-    fn on_job_done(self: &Rc<Self>, generation: u64, what: &str, r: Result<OpOutcome, String>) {
-        match r {
-            Err(e) => {
-                {
-                    let mut st = self.st.borrow_mut();
-                    st.pending_select.clear();
-                    st.pending_rename = false;
-                }
-                tracing::warn!("{what} : {e}");
-                self.flash_status(format!("{what} : {e}"));
-            }
-            Ok(out) => {
-                if out.aborted {
-                    self.flash_status(format!("{what} : opération annulée"));
-                }
-                if generation != self.generation.get() || out.created.is_empty() {
-                    return;
-                }
-                let Some(cur) = self.current_path() else { return };
-                let names: Vec<Vec<u16>> = out
-                    .created
-                    .iter()
-                    .filter(|p| p.parent().is_some_and(|d| same_path(d, &cur)))
-                    .filter_map(|p| p.file_name().map(wide))
-                    .collect();
-                if names.is_empty() {
-                    return;
-                }
-                {
-                    let mut st = self.st.borrow_mut();
-                    st.pending_select = names;
-                    st.pending_since = Some(Instant::now());
-                }
-                // Les éléments sont peut-être déjà affichés (surveillance plus rapide que nous).
-                if let Some(folder) = self.model.folder()
-                    && let Some((found, rename)) = self.take_pending(&folder)
-                {
-                    self.model.update_selection(|s, _| s.select_only(&found));
-                    self.after_pending(Some((found, rename)));
-                    self.update_status();
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------ barre d'état
-
-    fn update_status(&self) {
-        let (complete, filtered, total) = {
-            let st = self.st.borrow();
-            let Some(folder) = &st.folder else { return };
-            (st.complete, st.filter.has_query(), folder.len())
-        };
-        let shown = self.model.len();
-        let total = if complete { total.max(shown) } else { total };
-        let mut s = if !filtered && complete {
-            item_count(shown)
-        } else if filtered && complete {
-            format!("{} sur {}", group_thousands(shown as u64), item_count(total))
-        } else {
-            item_count(total)
-        };
-        let sel = self.model.selected();
-        if let Some(folder) = self.model.folder()
-            && !sel.is_empty()
-        {
-            let bytes: u64 = sel
-                .iter()
-                .filter_map(|&e| folder.entry(e))
-                .filter(|e| !e.is_dir())
-                .map(|e| e.size)
-                .sum();
-            if sel.len() == 1 {
-                s.push_str(" · 1 élément sélectionné");
-            } else {
-                s.push_str(&format!(
-                    " · {} éléments sélectionnés",
-                    group_thousands(sel.len() as u64)
-                ));
-            }
-            if bytes > 0 {
-                s.push_str(&format!(" ({})", human_size(bytes)));
-            }
-        }
-        if complete && let Some(ms) = self.timing.get().complete {
-            match ms.as_millis() {
-                0 => s.push_str(" · chargé en moins d'1 ms"),
-                n => s.push_str(&format!(" · chargé en {n} ms")),
-            }
-        }
-        self.ui.set_status(s.into());
-    }
-
-    /// Message temporaire dans la barre d'état (erreurs, confirmations).
-    fn flash_status(&self, msg: String) {
-        let seq = self.status_seq.get() + 1;
-        self.status_seq.set(seq);
-        self.ui.set_status(msg.into());
-        slint::Timer::single_shot(Duration::from_secs(5), move || {
-            with_app(|a| {
-                if a.status_seq.get() == seq {
-                    a.update_status();
-                }
+        let items: Vec<PaletteItem> = matches
+            .iter()
+            .filter_map(|c| COMMANDS.iter().find(|(x, _, _)| x == c))
+            .map(|(_, label, hint)| PaletteItem {
+                label: (*label).into(),
+                hint: (*hint).into(),
             })
+            .collect();
+        *self.palette.borrow_mut() = matches;
+        self.ui.set_palette_items(ModelRc::new(VecModel::from(items)));
+    }
+
+    fn palette_run(self: &Rc<Self>, index: i32) {
+        let cmd = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.palette.borrow().get(i).copied());
+        let pane = self.active_pane();
+        pane.ui_focus_list();
+        if let Some(cmd) = cmd {
+            self.run_cmd(cmd);
+        }
+    }
+
+    fn run_cmd(self: &Rc<Self>, cmd: Cmd) {
+        let pane = self.active_pane();
+        match cmd {
+            Cmd::NewTab => self.new_tab_here(),
+            Cmd::CloseTab => self.close_tab(self.active_tab.get()),
+            Cmd::ReopenTab => self.reopen_closed_tab(),
+            Cmd::NextTab => self.cycle_tab(1),
+            Cmd::ToggleDual => self.toggle_dual(),
+            Cmd::SwitchPane => self.switch_pane(),
+            Cmd::CopyToOther | Cmd::MoveToOther => self.transfer_to_other(cmd == Cmd::MoveToOther),
+            Cmd::TogglePreview => self.toggle_preview(),
+            Cmd::ToggleHidden => self.toggle_hidden(),
+            Cmd::Refresh => pane.refresh(),
+            Cmd::NewFolder => pane.new_folder(),
+            Cmd::SelectAll => {
+                pane.model.update_selection(|s, v| s.select_all(v));
+                pane.update_status();
+            }
+            Cmd::Rename => pane.begin_rename(),
+            Cmd::Delete => pane.delete_selection(false),
+            Cmd::Properties => self.properties(),
+            Cmd::CopyPath => self.copy_path(),
+            Cmd::OpenTerminal => self.open_terminal(),
+            Cmd::FolderSize => self.folder_sizes(),
+            Cmd::AddFavorite => self.add_favorite(),
+            Cmd::RemoveFavorite => self.remove_favorite(),
+        }
+    }
+
+    /// F5 / Maj+F5 en double volet : copie ou déplace la sélection vers le dossier de l'autre volet.
+    fn transfer_to_other(self: &Rc<Self>, is_move: bool) {
+        let src = self.active_pane();
+        let Some(dest) = self.other_pane().and_then(|p| p.current_path()) else {
+            src.flash_status("Double volet désactivé (F6 pour l'activer).".into());
+            return;
+        };
+        let items = src.selected_paths();
+        if items.is_empty() {
+            src.flash_status("Aucun élément sélectionné.".into());
+            return;
+        }
+        let what = if is_move { "Déplacement" } else { "Copie" };
+        src.run_job(Job::Drop { items, dest, is_move }, what);
+    }
+
+    /// Éléments visés par une commande : la sélection, sinon le dossier courant.
+    fn targets(&self) -> Vec<PathBuf> {
+        let p = self.active_pane();
+        let sel = p.selected_paths();
+        if sel.is_empty() {
+            p.current_path().into_iter().collect()
+        } else {
+            sel
+        }
+    }
+
+    fn properties(self: &Rc<Self>) {
+        let paths = self.targets();
+        let owner = self.hwnd.get().unwrap_or(0);
+        let id = self.active_pane().id;
+        if !self.host_post_raw(move |_| {
+            if let Err(e) = fx_win::shell::show_properties(&paths, owner) {
+                let msg = format!("Propriétés : {}", e.message());
+                post_pane(id, move |p| p.flash_status(msg));
+            }
+        }) {
+            self.active_pane()
+                .flash_status("Le service Shell est indisponible.".into());
+        }
+    }
+
+    fn copy_path(self: &Rc<Self>) {
+        let paths = self.targets();
+        let text = paths
+            .iter()
+            .map(|p| format!("\"{}\"", fx_win::path::display_form(p).display()))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let owner = self.hwnd.get().unwrap_or(0);
+        let id = self.active_pane().id;
+        let n = paths.len();
+        self.host_post_raw(move |_| {
+            let r = fx_win::clipboard::set_text(owner, &text);
+            post_pane(id, move |p| match r {
+                Ok(()) => p.flash_status(if n == 1 {
+                    "Chemin copié".into()
+                } else {
+                    format!("{n} chemins copiés")
+                }),
+                Err(e) => p.flash_status(format!("Presse-papiers : {}", e.message())),
+            });
         });
+    }
+
+    fn open_terminal(self: &Rc<Self>) {
+        let pane = self.active_pane();
+        let Some(dir) = pane.current_path() else { return };
+        let dir = fx_win::path::display_form(&dir);
+        let id = pane.id;
+        let _ = std::thread::Builder::new()
+            .name("fx-terminal".into())
+            .spawn(move || {
+                // Windows Terminal, sinon l'invite de commandes.
+                let wt = std::process::Command::new("wt.exe").arg("-d").arg(&dir).spawn();
+                if wt.is_err() {
+                    let cmd = std::process::Command::new("cmd.exe")
+                        .arg("/K")
+                        .current_dir(&dir)
+                        .spawn();
+                    if let Err(e) = cmd {
+                        let msg = format!("Terminal : {e}");
+                        post_pane(id, move |p| p.flash_status(msg));
+                    }
+                }
+            });
+    }
+
+    /// Calcule en arrière-plan la taille des dossiers sélectionnés (ou de tous ceux du dossier).
+    fn folder_sizes(self: &Rc<Self>) {
+        let pane = self.active_pane();
+        let Some(folder) = pane.model.folder() else { return };
+        let mut dirs: Vec<u32> = pane
+            .model
+            .selected()
+            .into_iter()
+            .filter(|&e| folder.entry(e).is_some_and(|x| x.is_dir()))
+            .collect();
+        if dirs.is_empty() {
+            dirs = pane
+                .model
+                .visible()
+                .into_iter()
+                .filter(|&e| folder.entry(e).is_some_and(|x| x.is_dir()))
+                .take(500)
+                .collect();
+        }
+        if dirs.is_empty() {
+            pane.flash_status("Aucun dossier à mesurer.".into());
+            return;
+        }
+        let source: Arc<dyn DirSource> = self.source.clone();
+        let jobs: Vec<(Vec<u16>, Arc<fx_core::size::SizeProgress>)> = dirs
+            .iter()
+            .map(|&e| {
+                (
+                    folder.name(e).to_vec(),
+                    fx_core::size::start(source.clone(), folder.child_path(e)),
+                )
+            })
+            .collect();
+        pane.st
+            .borrow_mut()
+            .size_jobs
+            .extend(jobs.iter().map(|(_, j)| j.clone()));
+        let generation = pane.generation.get();
+        poll_sizes(pane.id, generation, jobs);
+    }
+
+    fn add_favorite(self: &Rc<Self>) {
+        let pane = self.active_pane();
+        let folder = pane.model.folder();
+        let sel = pane.model.selected();
+        let target = match (&folder, sel.as_slice()) {
+            (Some(f), [e]) if f.entry(*e).is_some_and(|x| x.is_dir()) => Some(f.child_path(*e)),
+            _ => pane.current_path(),
+        };
+        let Some(target) = target else { return };
+        if self.favorites.borrow().iter().any(|f| same_path(f, &target)) {
+            pane.flash_status("Déjà dans les favoris.".into());
+            return;
+        }
+        self.favorites.borrow_mut().push(target);
+        self.save_favorites();
+        pane.sync_global();
+        pane.flash_status("Ajouté aux favoris".into());
+    }
+
+    fn remove_favorite(self: &Rc<Self>) {
+        let pane = self.active_pane();
+        let Some(cur) = pane.current_path() else { return };
+        let before = self.favorites.borrow().len();
+        self.favorites.borrow_mut().retain(|f| !same_path(f, &cur));
+        if self.favorites.borrow().len() == before {
+            pane.flash_status("Ce dossier n'est pas dans les favoris.".into());
+            return;
+        }
+        self.save_favorites();
+        pane.sync_global();
+        pane.flash_status("Retiré des favoris".into());
+    }
+
+    fn save_favorites(&self) {
+        let Some(dir) = &self.data_dir else { return };
+        let text: String = self
+            .favorites
+            .borrow()
+            .iter()
+            .map(|p| format!("{}\n", p.display()))
+            .collect();
+        let _ = std::fs::create_dir_all(dir);
+        if let Err(e) = std::fs::write(dir.join("favoris.txt"), text) {
+            tracing::warn!("favoris non enregistrés : {e}");
+        }
+    }
+
+    // ------------------------------------------------------------------ aperçu
+
+    fn toggle_preview(self: &Rc<Self>) {
+        let v = !self.preview_visible.get();
+        self.preview_visible.set(v);
+        self.ui.set_preview_visible(v);
+        self.update_preview();
+    }
+
+    /// Met à jour le volet d'aperçu pour la sélection du volet actif (phase 4, étape 3).
+    pub(crate) fn update_preview(self: &Rc<Self>) {
+        if !self.preview_visible.get() {
+            return;
+        }
+        let seq = self.preview_seq.get() + 1;
+        self.preview_seq.set(seq);
+        self.ui.set_preview_kind(0);
+        self.ui.set_preview_title(SharedString::new());
+        self.ui
+            .set_preview_text("Sélectionnez un fichier pour en afficher l'aperçu.".into());
     }
 
     // ------------------------------------------------------------------ instrumentation
-
-    fn mark_rows(&self, complete: bool) {
-        let elapsed = self.nav_start.get().elapsed();
-        let mut t = self.timing.get();
-        if t.first_rows.is_none() {
-            t.first_rows = Some(elapsed);
-        }
-        let mut wait = self.paint_wait.get() | PAINT_FIRST;
-        if complete {
-            t.complete = Some(elapsed);
-            wait |= PAINT_COMPLETE;
-        }
-        self.timing.set(t);
-        self.paint_wait.set(wait);
-    }
 
     fn on_redraw(self: &Rc<Self>) {
         self.frames.set(self.frames.get() + 1);
@@ -1511,31 +1209,12 @@ impl App {
                 with_app(|a| a.bench_first_frame(at, fx_win::process::ms_since_process_start()))
             });
         }
-        let wait = self.paint_wait.replace(0);
+        let pane = self.active_pane();
+        let wait = pane.paint_wait.replace(0);
         if wait != 0 {
             // Le timer à délai nul s'exécute après le rendu de cette image.
-            slint::Timer::single_shot(Duration::ZERO, move || with_app(|a| a.painted(wait)));
-        }
-    }
-
-    fn painted(self: &Rc<Self>, wait: u8) {
-        let elapsed = self.nav_start.get().elapsed();
-        let mut t = self.timing.get();
-        if wait & PAINT_FIRST != 0 && t.first_paint.is_none() {
-            t.first_paint = Some(elapsed);
-        }
-        if wait & PAINT_COMPLETE != 0 {
-            t.complete_paint = Some(elapsed);
-        }
-        self.timing.set(t);
-        if wait & PAINT_COMPLETE != 0 {
-            tracing::info!(
-                first_rows_ms = t.first_rows.map(|d| d.as_secs_f64() * 1000.0),
-                complete_ms = t.complete.map(|d| d.as_secs_f64() * 1000.0),
-                entries = t.stats.entries,
-                "dossier affiché"
-            );
-            self.bench_navigation_painted();
+            let id = pane.id;
+            slint::Timer::single_shot(Duration::ZERO, move || with_pane(id, |p| p.painted(wait)));
         }
     }
 
@@ -1551,7 +1230,7 @@ impl App {
         }
     }
 
-    fn bench_navigation_painted(self: &Rc<Self>) {
+    pub(crate) fn bench_navigation_painted(self: &Rc<Self>) {
         let mut next: Option<PathBuf> = None;
         let mut finish = false;
         {
@@ -1563,7 +1242,7 @@ impl App {
                     BenchMode::Startup { .. } => finish = true,
                     BenchMode::Scroll { .. } => {
                         slint::Timer::single_shot(Duration::from_millis(700), || {
-                            with_app(|a| a.start_scroll_bench());
+                            with_app(|a| a.start_scroll_bench())
                         });
                     }
                     BenchMode::SelfTest { .. } => {
@@ -1579,7 +1258,7 @@ impl App {
                 }
             } else if let BenchMode::Open { path, iterations, .. } = b.mode.clone() {
                 if b.on_target {
-                    let t = self.timing.get();
+                    let t = self.active_pane().timing.get();
                     b.entries = t.stats.entries;
                     b.results.push(t);
                     if b.iteration + 1 == iterations {
@@ -1604,7 +1283,7 @@ impl App {
         }
         if let Some(path) = next {
             slint::Timer::single_shot(Duration::from_millis(300), move || {
-                with_app(|a| a.navigate(path, true, Vec::new()));
+                with_app(|a| a.active_pane().navigate(path, true, Vec::new()));
             });
         }
         if finish {
@@ -1621,10 +1300,11 @@ impl App {
     }
 
     fn selected_display_names(&self) -> Vec<String> {
-        let Some(folder) = self.model.folder() else {
+        let p = self.active_pane();
+        let Some(folder) = p.model.folder() else {
             return Vec::new();
         };
-        self.model
+        p.model
             .selected()
             .into_iter()
             .map(|e| folder.display_name(e))
@@ -1639,6 +1319,7 @@ impl App {
                 with_app(|a| a.self_test_step(step + 1, d));
             });
         };
+        let p = self.active_pane();
         match step {
             0 => {
                 // Fichiers créés par un autre programme : la surveillance doit les faire apparaître.
@@ -1649,26 +1330,24 @@ impl App {
             }
             1 => {
                 self.check(
-                    self.model.len() == 3,
-                    &format!(
-                        "surveillance : 3 fichiers externes affichés ({})",
-                        self.model.len()
-                    ),
+                    p.model.len() == 3,
+                    &format!("surveillance : 3 fichiers externes affichés ({})", p.model.len()),
                 );
-                self.new_folder();
+                p.new_folder();
                 next(1200, dir);
             }
             2 => {
-                let renaming = self.st.borrow().rename_entry.is_some();
+                let ui = p.ui_snapshot();
+                let renaming = p.st.borrow().rename_entry.is_some();
                 self.check(
-                    renaming && self.ui.get_rename_row() >= 0,
+                    renaming && ui.rename_row >= 0,
                     "nouveau dossier créé et passé en renommage",
                 );
                 self.check(
-                    self.ui.get_rename_text() == "Nouveau dossier",
-                    &format!("nom proposé « {} »", self.ui.get_rename_text()),
+                    ui.rename_text == "Nouveau dossier",
+                    &format!("nom proposé « {} »", ui.rename_text),
                 );
-                self.rename_commit("Dossier renommé");
+                p.rename_commit("Dossier renommé");
                 next(1200, dir);
             }
             3 => {
@@ -1681,27 +1360,27 @@ impl App {
                     sel == ["Dossier renommé"],
                     &format!("élément renommé sélectionné ({sel:?})"),
                 );
-                self.on_key("a", true, false, false);
+                p.on_key("a", true, false, false);
                 self.check(
-                    self.model.selected().len() == 4,
-                    &format!("Ctrl+A : {} éléments sélectionnés", self.model.selected().len()),
+                    p.model.selected().len() == 4,
+                    &format!("Ctrl+A : {} éléments sélectionnés", p.model.selected().len()),
                 );
-                self.sort_by(3);
+                p.sort_by(3);
                 next(400, dir);
             }
             4 => {
-                let names: Vec<String> = self
+                let names: Vec<String> = p
                     .model
                     .visible()
                     .iter()
-                    .filter_map(|&e| self.model.folder().map(|f| f.display_name(e)))
+                    .filter_map(|&e| p.model.folder().map(|f| f.display_name(e)))
                     .collect();
                 self.check(
                     names == ["Dossier renommé", "bravo.txt", "charlie.log", "alpha.txt"],
                     &format!("tri par taille, dossiers en premier ({names:?})"),
                 );
-                self.sort_by(0);
-                self.on_key("c", false, false, false);
+                p.sort_by(0);
+                p.on_key("c", false, false, false);
                 let sel = self.selected_display_names();
                 self.check(
                     sel == ["charlie.log"],
@@ -1714,9 +1393,9 @@ impl App {
                     fx_win::shell::client_to_screen(hwnd, (400.0 * scale) as i32, (300.0 * scale) as i32)
                 };
                 let folder_path = dir.clone();
-                let items = self.selected_paths();
+                let items = p.selected_paths();
                 let owner = self.hwnd.get().unwrap_or(0);
-                self.host_post(move |ctx| {
+                self.host_post_raw(move |ctx| {
                     let opts = MenuOptions {
                         x,
                         y,
@@ -1743,15 +1422,14 @@ impl App {
             }
             6 => {
                 self.check(
-                    self.model.len() == 3,
-                    &format!("suppression externe appliquée ({} éléments)", self.model.len()),
+                    p.model.len() == 3,
+                    &format!("suppression externe appliquée ({} éléments)", p.model.len()),
                 );
                 let sel = self.selected_display_names();
                 self.check(
                     sel.len() == 1,
                     &format!("sélection reportée après suppression ({sel:?})"),
                 );
-                // Fichier caché créé par un autre programme : masqué par défaut.
                 {
                     use std::os::windows::fs::OpenOptionsExt;
                     let _ = std::fs::OpenOptions::new()
@@ -1764,43 +1442,103 @@ impl App {
             }
             7 => {
                 self.check(
-                    self.model.len() == 3,
-                    &format!("fichier caché masqué ({} éléments affichés)", self.model.len()),
+                    p.model.len() == 3,
+                    &format!("fichier caché masqué ({} éléments affichés)", p.model.len()),
                 );
-                self.on_key("h", true, false, false);
+                p.on_key("h", true, false, false);
                 next(400, dir);
             }
             8 => {
                 self.check(
-                    self.model.len() == 4,
-                    &format!("Ctrl+H affiche le fichier caché ({} éléments)", self.model.len()),
+                    p.model.len() == 4,
+                    &format!("Ctrl+H affiche le fichier caché ({} éléments)", p.model.len()),
                 );
                 // Partage réseau injoignable : abandon après le délai, sans bloquer l'interface.
-                self.navigate(PathBuf::from(r"\\10.255.255.6\partage"), true, Vec::new());
+                p.navigate(PathBuf::from(r"\\10.255.255.6\partage"), true, Vec::new());
                 let wait = self.network_timeout + Duration::from_millis(800);
                 slint::Timer::single_shot(wait, move || with_app(|a| a.self_test_step(9, dir)));
             }
             9 => {
-                let err = self.ui.get_error_text().to_string();
+                let ui = p.ui_snapshot();
+                let err = ui.error.to_string();
                 self.check(
                     err.contains("ne répond pas") || err.contains("injoignable"),
                     &format!("partage injoignable signalé ({err:?})"),
                 );
-                self.check(
-                    !self.ui.get_loading(),
-                    "chargement terminé (plus de « Chargement… »)",
-                );
-                self.go_back();
+                self.check(!ui.loading, "chargement terminé (plus de « Chargement… »)");
+                p.go_back();
                 next(900, dir);
             }
             10 => {
                 self.check(
-                    self.model.len() == 4
-                        && self.current_path().as_deref().is_some_and(|p| same_path(p, &dir)),
+                    p.model.len() == 4 && p.current_path().as_deref().is_some_and(|c| same_path(c, &dir)),
                     &format!(
                         "retour arrière vers le dossier de test ({} éléments)",
-                        self.model.len()
+                        p.model.len()
                     ),
+                );
+                // Onglets : Ctrl+T ouvre un onglet sur le même dossier.
+                self.on_key(-1, "t", true, false, false);
+                next(700, dir);
+            }
+            11 => {
+                let n = self.tabs.borrow().len();
+                self.check(
+                    n == 2
+                        && self.active_tab.get() == 1
+                        && p.current_path().is_some_and(|c| same_path(&c, &dir)),
+                    &format!("Ctrl+T : nouvel onglet actif ({n} onglets)"),
+                );
+                p.navigate(dir.join("Dossier renommé"), true, Vec::new());
+                next(700, dir);
+            }
+            12 => {
+                let tabs = self.tabs.borrow().len();
+                // Double volet : F6, puis F5 copie vers l'autre volet.
+                self.on_key(-1, &char::from(Key::F6).to_string(), false, false, false);
+                self.check(
+                    self.active_tab().dual.get(),
+                    &format!("F6 : double volet activé ({tabs} onglets)"),
+                );
+                let _ = std::fs::write(dir.join("Dossier renommé").join("à copier.txt"), b"x");
+                next(900, dir);
+            }
+            13 => {
+                // Volet actif : gauche (sous-dossier) ; on sélectionne « à copier.txt » et F5.
+                p.on_key("à", false, false, false);
+                let sel = self.selected_display_names();
+                self.check(
+                    sel == ["à copier.txt"],
+                    &format!("sélection dans le volet gauche ({sel:?})"),
+                );
+                self.on_key(-1, &char::from(Key::F5).to_string(), false, false, false);
+                next(1500, dir);
+            }
+            14 => {
+                // L'autre volet s'est ouvert sur le même dossier (sous-dossier) : la copie y crée
+                // « à copier - Copie.txt ».
+                let copied = std::fs::read_dir(dir.join("Dossier renommé"))
+                    .map(|d| d.flatten().count())
+                    .unwrap_or(0);
+                self.check(
+                    copied == 2,
+                    &format!("F5 : copie vers l'autre volet ({copied} fichiers)"),
+                );
+                self.on_key(-1, "w", true, false, false);
+                next(500, dir);
+            }
+            15 => {
+                let n = self.tabs.borrow().len();
+                self.check(n == 1, &format!("Ctrl+W : onglet fermé ({n} onglet)"));
+                self.on_key(-1, "t", true, true, false);
+                next(700, dir);
+            }
+            16 => {
+                let n = self.tabs.borrow().len();
+                let dual = self.active_tab().dual.get();
+                self.check(
+                    n == 2 && dual,
+                    &format!("Ctrl+Maj+T : onglet rouvert, double volet conservé ({n} onglets)"),
                 );
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
@@ -1812,10 +1550,11 @@ impl App {
         let driver = slint::Timer::default();
         driver.start(slint::TimerMode::Repeated, Duration::from_millis(2), || {
             with_app(|a| {
-                let max = a.ui.get_max_scroll() as f64;
+                let p = a.active_pane();
+                let max = p.max_scroll() as f64;
                 let pos = a.scroll.borrow_mut().as_mut().and_then(|r| r.position(max));
                 match pos {
-                    Some(y) => a.ui.invoke_set_scroll(y as f32),
+                    Some(y) => p.set_scroll(y as f32),
                     None => {
                         let report = a
                             .scroll
@@ -1827,7 +1566,7 @@ impl App {
                         if let Some(b) = a.bench.borrow_mut().as_mut() {
                             b.report += &format!(
                                 "défilement de {} éléments, fenêtre {}x{} px, échelle {} :\n{report}",
-                                a.model.len(),
+                                p.model.len(),
                                 size.width,
                                 size.height,
                                 a.ui.window().scale_factor()
@@ -1911,4 +1650,34 @@ impl App {
         }
         let _ = slint::quit_event_loop();
     }
+}
+
+/// Rafraîchit les tailles de dossiers en cours de calcul, jusqu'à la fin (ou au changement de
+/// dossier du volet).
+fn poll_sizes(pane_id: u64, generation: u64, jobs: Vec<(Vec<u16>, Arc<fx_core::size::SizeProgress>)>) {
+    slint::Timer::single_shot(Duration::from_millis(250), move || {
+        with_pane(pane_id, |p| {
+            if p.generation.get() != generation {
+                return;
+            }
+            let mut pending = Vec::new();
+            let mut total = 0u64;
+            for (name, job) in jobs {
+                let done = job.is_done();
+                p.model.set_dir_size(&name, job.bytes(), done);
+                total += job.bytes();
+                if !done {
+                    pending.push((name, job));
+                }
+            }
+            if pending.is_empty() {
+                p.flash_status(format!(
+                    "Taille calculée : {}",
+                    fx_core::format::human_size(total)
+                ));
+            } else {
+                poll_sizes(pane_id, generation, pending);
+            }
+        });
+    });
 }

@@ -108,3 +108,33 @@ pub fn paste(dest: &Path, opts: OpOptions) -> windows::core::Result<Option<OpOut
     }
     Ok(Some(out))
 }
+
+/// Place du texte (chemins copiés) dans le presse-papiers. `owner` : fenêtre propriétaire.
+pub fn set_text(owner: isize, text: &str) -> windows::core::Result<()> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: le presse-papiers est ouvert puis refermé dans ce bloc ; le HGLOBAL est rempli
+    // sous verrou avec exactement `wide.len()` unités, puis confié au système par
+    // SetClipboardData (qui en devient propriétaire en cas de succès).
+    unsafe {
+        OpenClipboard(Some(HWND(owner as *mut _)))?;
+        let result = (|| {
+            EmptyClipboard()?;
+            let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2)?;
+            let p = GlobalLock(mem).cast::<u16>();
+            if p.is_null() {
+                return Err(windows::core::Error::from_thread());
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+            let _ = GlobalUnlock(mem);
+            SetClipboardData(CF_UNICODETEXT, Some(HANDLE(mem.0)))?;
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}

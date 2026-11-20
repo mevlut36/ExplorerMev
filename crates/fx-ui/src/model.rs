@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use fx_core::Folder;
-use fx_core::format::size_kb;
+use fx_core::format::{human_size, size_kb};
 use fx_core::selection::Selection;
 use slint::{Image, Model, ModelNotify, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString};
 
@@ -42,18 +42,21 @@ pub struct FolderModel {
     view: RefCell<View>,
     notify: ModelNotify,
     icons: RefCell<IconCache>,
-    loader: IconLoader,
+    loader: std::sync::Arc<IconLoader>,
+    /// Tailles de dossiers calculées à la demande, par nom : (octets, terminé).
+    dir_sizes: RefCell<HashMap<Vec<u16>, (u64, bool)>>,
     icon_px: Cell<u32>,
 }
 
 impl FolderModel {
-    pub fn new(loader: IconLoader) -> Self {
+    pub fn new(loader: std::sync::Arc<IconLoader>) -> Self {
         Self {
             view: RefCell::default(),
             notify: ModelNotify::default(),
             icons: RefCell::default(),
             loader,
             icon_px: Cell::new(16),
+            dir_sizes: RefCell::default(),
         }
     }
 
@@ -63,10 +66,6 @@ impl FolderModel {
             self.icon_px.set(px);
             *self.icons.borrow_mut() = IconCache::default();
         }
-    }
-
-    pub fn icon_loader(&self) -> &IconLoader {
-        &self.loader
     }
 
     /// Nouvelle vue complète (nouveau dossier, nouveau tri ou filtre, mise à jour).
@@ -176,26 +175,52 @@ impl FolderModel {
         result
     }
 
+    /// Taille calculée d'un dossier (affichée dans la colonne Taille).
+    pub fn set_dir_size(&self, name: &[u16], bytes: u64, done: bool) {
+        self.dir_sizes.borrow_mut().insert(name.to_vec(), (bytes, done));
+        let row = {
+            let v = self.view.borrow();
+            v.folder
+                .as_ref()
+                .and_then(|f| f.find(name))
+                .and_then(|e| v.row_of.get(e as usize).copied())
+        };
+        if let Some(r) = row.filter(|&r| r != u32::MAX) {
+            self.notify.row_changed(r as usize);
+        }
+    }
+
+    pub fn clear_dir_sizes(&self) {
+        self.dir_sizes.borrow_mut().clear();
+    }
+
     /// Icônes chargées : mise en cache et rafraîchissement des lignes qui les attendaient.
-    pub fn on_icons(&self, delivered: Delivered) {
+    pub fn on_icons(&self, delivered: &Delivered) {
         let rows = {
             let mut c = self.icons.borrow_mut();
+            let mut mine = false;
             for (key, result) in delivered {
-                c.pending.remove(&key);
+                if !c.pending.remove(key) {
+                    continue; // demandée par un autre volet
+                }
+                mine = true;
                 // Requête abandonnée : rien en cache, elle sera refaite si la ligne revient.
                 let Some(img) = result else { continue };
                 if matches!(key, IconKey::Item(_)) {
                     c.item_count += 1;
                 }
-                let image = img.map(|i| {
+                let image = img.as_ref().map(|i| {
                     let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&i.rgba, i.width, i.height);
                     Image::from_rgba8(buf)
                 });
-                c.images.insert(key, image);
+                c.images.insert(key.clone(), image);
             }
             if c.item_count > MAX_ITEM_ICONS {
                 c.images.retain(|k, _| matches!(k, IconKey::Type { .. }));
                 c.item_count = 0;
+            }
+            if !mine {
+                return;
             }
             std::mem::take(&mut c.waiting_rows)
         };
@@ -255,7 +280,11 @@ impl Model for FolderModel {
                 .unwrap_or_default(),
             kind: folder.type_label(&e).into(),
             size: if e.is_dir() {
-                SharedString::new()
+                match self.dir_sizes.borrow().get(folder.name(index)) {
+                    Some(&(bytes, true)) => human_size(bytes).into(),
+                    Some(&(bytes, false)) => format!("… {}", human_size(bytes)).into(),
+                    None => SharedString::new(),
+                }
             } else {
                 size_kb(e.size).into()
             },
