@@ -49,6 +49,13 @@ $ver3 = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
 # version plus élevée. Par défaut, les heures écoulées depuis le 2026-01-01 (croissant à chaque
 # production) ; -Revision 0 pour une version publiée.
 if ($Revision -lt 0) { $Revision = [int][math]::Floor(((Get-Date) - [datetime]"2026-01-01").TotalHours) }
+# Une version déjà installée (même version à trois nombres) impose une révision plus élevée.
+$installed = Get-AppxPackage -Name ExplorerMev -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($installed -and $installed.Version -like "$ver3.*") {
+    $minimum = [int]($installed.Version.Split(".")[3]) + 1
+    if ($PSBoundParameters.ContainsKey("Revision") -and $Revision -lt $minimum) { throw "Revision $Revision <= version installée ($($installed.Version))" }
+    if ($Revision -lt $minimum) { $Revision = $minimum }
+}
 if ($Revision -gt 65535) { throw "Revision hors limites (0-65535) : $Revision" }
 $ver4 = "$ver3.$Revision"
 "Version : $ver3 (paquet $ver4)"

@@ -232,9 +232,10 @@ mod tests {
         assert!(!is_win_e(0x45, false, true, false, false, true), "Alt+Win+E");
     }
 
+    /// Les requêtes sur l'agent ne doivent pas paniquer. Aucune assertion sur son état et jamais
+    /// d'arrêt : un agent réel de l'utilisateur peut tourner pendant les tests.
     #[test]
-    fn no_agent_runs_during_tests() {
-        assert!(!is_agent_running());
-        assert!(!stop_agent());
+    fn agent_queries_do_not_panic() {
+        let _ = is_agent_running();
     }
 }
