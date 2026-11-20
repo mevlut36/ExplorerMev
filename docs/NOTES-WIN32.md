@@ -60,3 +60,79 @@ reproduire.
   stderr (« Compiling… ») interrompt le script.
 - **Conséquence** : les scripts du dépôt testent `$LASTEXITCODE` au lieu de passer par
   `ErrorActionPreference`.
+
+---
+
+## Phase 1
+
+### `LCMapStringEx` + `SORT_DIGITSASNUMBERS` reproduit `StrCmpLogicalW`
+
+- **Constat** : une clé de tri obtenue par `LCMapStringEx(LOCALE_NAME_USER_DEFAULT,
+  LCMAP_SORTKEY | NORM_IGNORECASE | SORT_DIGITSASNUMBERS, …)`, comparée octet par octet, donne
+  le même ordre que `StrCmpLogicalW` (la comparaison de l'Explorateur) : **0 désaccord sur
+  20 000 paires** aléatoires (accents, casse, chiffres, ponctuation, émoji), ni sur une liste de
+  cas choisis.
+- **Intérêt** : les clés se calculent une fois par nom, en parallèle, et le tri se réduit à
+  des `memcmp` (2 ms pour 100 000 noms au lieu d'environ 1,7 million d'appels à
+  `StrCmpLogicalW`).
+- **Reproduction** : `cargo test -p fx-win --test natural_sort -- --nocapture`.
+
+### `LCMapStringEx(LCMAP_SORTKEY)` : taille de destination en octets
+
+- **Constat** : avec `LCMAP_SORTKEY`, `cchDest` compte des **octets**, alors que le wrapper du
+  crate `windows` (0.62) le calcule à partir d'une tranche `&mut [u16]`. On passe donc une
+  tranche de N `u16` annoncée comme N octets (sûr : la capacité réelle est 2N), puis on relit
+  les octets écrits. Voir `fx_win::locale::natural_sort_key`.
+
+### `FILE_FULL_DIR_INFO.EaSize` contient le tag de point d'analyse
+
+- **Constat** : pour une entrée `FILE_ATTRIBUTE_REPARSE_POINT`, `EaSize` de
+  `FileFullDirectoryInfo` vaut le tag (`IO_REPARSE_TAG_MOUNT_POINT` pour une jonction), comme
+  `dwReserved0` pour `FindFirstFileExW`.
+- **Reproduction** : `cargo test -p fx-win --test listing junction`.
+- **Non vérifié** : les liens symboliques. Le test correspondant est ignoré sur la machine de
+  développement : la création de lien exige le mode développeur ou des droits d'administration.
+
+### `FILE_FLAG_BACKUP_SEMANTICS` ouvre aussi les fichiers
+
+- **Constat** : `CreateFileW(…, FILE_FLAG_BACKUP_SEMANTICS)` réussit sur un fichier ; c'est
+  `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` qui échoue ensuite, avec
+  `ERROR_INVALID_PARAMETER`, la même erreur que « classe non prise en charge ». Sans précaution,
+  on déclencherait le repli au lieu de signaler « ce n'est pas un dossier ».
+- **Parade** : vérifier `FILE_ATTRIBUTE_DIRECTORY` via `FileBasicInfo` juste après l'ouverture.
+
+### Racine de volume vide
+
+- `FindFirstFileExW("X:\*")` sur une racine sans entrée renvoie `ERROR_FILE_NOT_FOUND` (il n'y
+  a pas de « . » à la racine) ; on le traite comme un dossier vide.
+
+### Libellé de type « txtfile »
+
+- **Constat** : pour `.gitignore`, `SHGetFileInfoW(SHGFI_TYPENAME)` renvoie « txtfile ». La clé
+  `HKCR\.gitignore` pointe vers un ProgID `txtfile` qui n'existe pas sur cette machine.
+  L'Explorateur affiche **le même libellé** (vérifié via `Shell.Application`, `GetDetailsOf`
+  colonne 2). Ce n'est donc pas un bogue de notre côté.
+
+### Automatisation des tests d'interface : verrou de premier plan
+
+- **Constat** : `SetForegroundWindow` depuis un script échoue souvent (verrou de premier plan
+  de Windows). Des clics synthétiques envoyés « à l'aveugle » peuvent alors atterrir dans une
+  autre application, et `CopyFromScreen` capture ce qui est réellement à l'écran.
+- **Parade** : vérifier `GetForegroundWindow()` avant chaque entrée synthétique et capturer par
+  `PrintWindow(PW_RENDERFULLCONTENT)`, qui ne photographie que notre fenêtre (Mica compris).
+  À terme, préférer des tests d'interface headless (backend de test Slint).
+
+### Manifeste
+
+- Vérification de l'intégration : `mt.exe -inputresource:windir.exe;#1 -out:x.manifest`
+  (SDK 10.0.26100). Le manifeste contient PerMonitorV2, `longPathAware`, `asInvoker` et
+  Common Controls v6.
+
+### Slint
+
+- Un identifiant d'élément nommé `list` masque la valeur d'énumération `list` :
+  `accessible-role: list` échoue alors avec « Cannot take reference of an element ».
+- `ensure-visible` est le nom d'une fonction intégrée : la redéfinir provoque un avertissement
+  de masquage.
+- Le code généré par `slint::include_modules!()` utilise `unwrap()`. On l'inclut dans un
+  module annoté `#[allow(clippy::unwrap_used, …)]` pour garder les lints stricts sur notre code.

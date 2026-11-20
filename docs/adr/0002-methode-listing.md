@@ -1,7 +1,8 @@
 # ADR 0002 — Méthode de listing des dossiers
 
-- **Statut** : proposé. La décision finale sera prise sur benchmark en phase 1.
-- **Date** : 2026-11-20
+- **Statut** : accepté (phase 1, 2026-11-20)
+- **Mesures** : `cargo bench -p fx-bench --bench listing`, résultats dans
+  [docs/mesures/phase1.md](../mesures/phase1.md)
 
 ## Contexte
 
@@ -10,42 +11,43 @@ liste complète triée en moins de 1 s, sans jamais bloquer le thread d'interfac
 obtenir, sans ouvrir chaque fichier : la taille, les dates, les attributs (dont les états
 OneDrive) et le type de point d'analyse (lien symbolique, jonction, fichier cloud).
 
-## Candidats
+## Mesures (NTFS local, cache chaud, médiane criterion)
 
-| # | Méthode | Atouts | Points d'attention |
+| Méthode | 1 000 | 10 000 | 100 000 |
 |---|---|---|---|
-| A | `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` sur un handle de dossier, grand tampon | Lots de centaines d'entrées par appel ; fournit `ReparsePointTag` et l'identifiant de fichier 128 bits sans ouvrir les fichiers | Classe d'information refusée par certains systèmes de fichiers (FAT/exFAT, certains serveurs SMB) : repli obligatoire |
-| B | `GetFileInformationByHandleEx(FileFullDirectoryInfo)` | Même principe, plus largement pris en charge | Pas de `ReparsePointTag` (seulement l'attribut `REPARSE_POINT`) |
-| C | `FindFirstFileExW(FindExInfoBasic, FIND_FIRST_EX_LARGE_FETCH)` | Universel, robuste, nom court omis | Copie de chaque entrée dans un `WIN32_FIND_DATAW` (≈ 600 octets) ; tag de reparse dans `dwReserved0` |
-| D | `std::fs::read_dir` | Aucun `unsafe` | Référence de comparaison uniquement ; implémentation interne à vérifier |
+| **A — `FileIdExtdDirectoryInfo`, tampon 64 Kio** | 0,50 ms | 4,5 ms | **39,4 ms** |
+| A — tampon 256 Kio | 0,51 ms | 4,7 ms | 40,7 ms |
+| A — tampon 1 Mio | 0,66 ms | 4,8 ms | 42,8 ms |
+| B — `FileFullDirectoryInfo`, 64 Kio | 0,44 ms | 4,6 ms | 43,3 ms |
+| C — `FindFirstFileExW` + `LARGE_FETCH` | 0,49 ms | 4,7 ms | 46,6 ms |
+| D — `std::fs::read_dir` (+ `metadata()`) | 0,73 ms | 6,4 ms | 63,3 ms |
 
-## Protocole de décision (phase 1)
+Les méthodes natives sont proches : le coût est surtout dans le noyau. Un tampon plus grand
+n'apporte rien en local (il reste utile en réseau, pour réduire les allers-retours SMB : à
+mesurer en phase 3).
 
-- Bench `criterion` dans `benches/listing.rs` sur 1 000, 10 000 et 100 000 fichiers générés
-  (script `scripts/gen-fixtures`), NTFS local, cache chaud et cache froid (volume de test
-  démonté puis remonté, ou fichier d'échange vidé avec RAMMap si disponible).
-- Pour A et B : tampons de 64 Kio, 256 Kio et 1 Mio.
-- Mesures : temps jusqu'au premier lot de 1 000 entrées, temps total, allocations.
-- Règle : on retient la méthode la plus rapide au temps total sur 100 000 entrées, à moins
-  qu'une autre soit plus rapide de plus de 20 % au premier lot. Le repli suit l'ordre
-  A → B → C, choisi par volume selon l'erreur `ERROR_INVALID_PARAMETER` / `ERROR_NOT_SUPPORTED`
-  et mémorisé.
+## Décision
 
-## Hypothèse de travail
+**A avec un tampon de 64 Kio, repli automatique sur B puis C** quand le système de fichiers
+refuse la classe d'information (`ERROR_INVALID_PARAMETER`, `ERROR_NOT_SUPPORTED`,
+`ERROR_INVALID_LEVEL`, `ERROR_INVALID_FUNCTION` au premier appel). Implémentation :
+`fx_win::listing::list_dir`.
 
-A avec un tampon de 64 à 256 Kio, avec repli B puis C. A est la seule méthode qui donne
-directement le tag de point d'analyse, nécessaire pour reconnaître les fichiers cloud et les
-liens sans ouvrir de fichier.
+A est la plus rapide sur 100 000 entrées, et la seule qui donne directement
+`ReparsePointTag`. B le fournit aussi, via `EaSize` pour les points d'analyse (vérifié par
+test, voir NOTES-WIN32.md). Les trois méthodes renvoient des résultats identiques sur les
+arborescences de test (`crates/fx-win/tests/listing.rs`).
 
-## Contraintes indépendantes de la méthode
+## Conséquences
 
 - Le handle de dossier est ouvert avec `FILE_LIST_DIRECTORY | SYNCHRONIZE`,
-  `FILE_FLAG_BACKUP_SEMANTICS` et le partage complet (lecture, écriture, suppression), via un
-  chemin `\\?\`.
-- L'énumération ne lit jamais les données des fichiers, donc ne déclenche pas le téléchargement
-  des fichiers OneDrive. En revanche, lister un **dossier** cloud non encore peuplé peut faire
-  interroger le service cloud par le pilote de filtre : l'opération doit être annulable et
-  soumise à un délai, comme un accès réseau.
-- Les noms sont conservés en UTF-16 brut (y compris les paires de substitution invalides) et
-  convertis pour l'affichage seulement.
-- Les entrées sont émises par lots vers le thread d'interface (voir ARCHITECTURE.md).
+  `FILE_FLAG_BACKUP_SEMANTICS`, partage complet, via un chemin `\\?\` ; on vérifie
+  ensuite qu'il s'agit bien d'un dossier (`FileBasicInfo`), car `BACKUP_SEMANTICS` ouvre aussi
+  les fichiers.
+- Les noms sont empruntés directement dans le tampon (pas de copie par entrée) et conservés en
+  UTF-16 brut, substituts isolés compris.
+- L'énumération ne lit jamais les données des fichiers : pas de téléchargement OneDrive. Lister
+  un **dossier** cloud non peuplé peut interroger le service cloud ; c'est pourquoi le listing
+  est annulable (consulté entre deux tampons). Le délai d'expiration réseau est prévu en phase 3.
+- Le chargeur complet (listing, types, clés et tri) prend 54 à 61 ms dans l'application pour
+  100 000 entrées : la cible de 1 s est tenue avec une large marge.

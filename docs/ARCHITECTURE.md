@@ -5,8 +5,9 @@ léger que l'Explorateur Windows. Ce document décrit l'organisation cible. Les 
 structurants sont justifiés dans les ADR :
 
 - [ADR 0001 — Framework d'interface](adr/0001-framework-ui.md) : Slint fluent, moteur de rendu logiciel
-- [ADR 0002 — Méthode de listing](adr/0002-methode-listing.md) : `GetFileInformationByHandleEx`, à confirmer par benchmark
+- [ADR 0002 — Méthode de listing](adr/0002-methode-listing.md) : `GetFileInformationByHandleEx(FileIdExtdDirectoryInfo)` (accepté, mesuré)
 - [ADR 0003 — Stratégie d'index](adr/0003-strategie-index.md) : MFT + USN dans un service optionnel
+- [ADR 0004 — Stratégie de panic](adr/0004-strategie-panic.md) : `panic = "unwind"`, workers isolés par `catch_unwind`
 
 ## 1. Principes
 
@@ -35,7 +36,7 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 | `fx-win` | **Seul crate avec `unsafe`.** Wrappers sûrs Win32/COM/Shell : listing, attributs, chemins `\\?\`, `ReadDirectoryChangesW`, `IFileOperation`, `IContextMenu`, icônes, DWM, presse-papiers, OLE drag-drop, threads STA. | `windows` |
 | `fx-core` | Modèle métier sans interface : dossier et entrées, tri naturel, filtres, navigation et historique, application des événements de surveillance, file d'opérations. Testable sans fenêtre ; le système de fichiers est abstrait par des traits (`DirLister`, `Watcher`, `FileOps`). | — (traits) ; `fx-win` derrière une feature `windows` |
 | `fx-index` | Client de l'index (named pipe), repli sans élévation, format d'instantané partagé avec le service. | `fx-core`, `fx-win` |
-| `fx-ui` | Fichiers `.slint`, adaptateurs `slint::Model` vers `fx-core`, raccourcis, thème. | `fx-core`, `slint` |
+| `fx-ui` | Fichiers `.slint`, adaptateurs `slint::Model` vers `fx-core`, raccourcis, thème. | `fx-core`, `fx-win` (formatage des dates, DWM, Shell), `slint` |
 | `fx-app` | Binaire : manifeste, démarrage, configuration TOML, journalisation `tracing`, `--bench-startup`. | tous |
 | `benches/` | Benchmarks `criterion` (listing, tri, filtre, requête d'index). | `fx-core`, `fx-win` |
 
@@ -61,6 +62,11 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 - Les appels Shell qui exigent un STA tournent sur des threads dédiés initialisés en
   `COINIT_APARTMENTTHREADED`, avec leur propre pompe de messages et une fenêtre propriétaire
   cachée pour les menus.
+**État en phase 1** : un thread `fx-list` par chargement (initialisé en STA pour
+`SHGetFileInfoW`), le tri et le filtre après chargement sur le pool `rayon`
+(`Loader::compute_view` / `filter_view`), un thread `fx-shell` (STA) pour `ShellExecuteExW`. La
+surveillance (`ReadDirectoryChangesW`) arrive en phase 2.
+
 - Chaque worker s'exécute sous `catch_unwind` (avec `panic = "unwind"` dans les crates de
   bibliothèque ; voir section 8). Un panic fait échouer la requête, est journalisé et ne
   touche pas l'état partagé : les workers ne partagent que des messages, aucun verrou exposé.
@@ -85,24 +91,25 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 ## 5. Représentation des données
 
 ```rust
-/// ~40 octets par entrée ; 100 000 entrées ≈ 4 Mo + noms.
-struct Entry {
-    name: NameRef,        // u32 décalage + u16 longueur dans l'arène UTF-16 du dossier
-    size: u64,
-    modified: i64,        // FILETIME brut, formaté seulement à l'affichage
-    created: i64,
-    attributes: u32,      // dont RECALL_ON_DATA_ACCESS, RECALL_ON_OPEN, PINNED, UNPINNED
-    reparse_tag: u32,     // lien symbolique, jonction, cloud…
-    type_id: u16,         // index dans la table des types (extension → libellé, icône)
-    flags: u16,           // dossier, caché, système, nom non convertible…
+/// 48 octets par entrée (vérifié par test) ; 100 000 entrées ≈ 4,8 Mo + noms.
+pub struct Entry {
+    pub size: u64,
+    pub modified: i64,    // FILETIME brut, formaté seulement à l'affichage
+    pub created: i64,
+    name_start: u32,      // décalage dans l'arène UTF-16 du dossier
+    pub attributes: u32,  // dont RECALL_ON_DATA_ACCESS, RECALL_ON_OPEN, PINNED, UNPINNED
+    pub reparse_tag: u32, // lien symbolique, jonction, cloud…
+    pub type_id: u32,     // index dans la table des libellés de type du dossier
+    name_len: u16,
 }
-struct Folder {
-    path: FolderPath,     // un seul chemin complet pour toutes les entrées
+pub struct Folder {       // partagé en Arc<Folder> entre le chargeur et l'interface
+    path: PathBuf,        // un seul chemin complet pour toutes les entrées
     names: Vec<u16>,      // arène UTF-16 (noms invalides conservés tels quels)
     entries: Vec<Entry>,
-    order: Vec<u32>,      // vue triée
-    filtered: Option<Vec<u32>>,
+    types: Vec<Arc<str>>, // libellés de type, partagés par extension
 }
+// Côté interface : order: Arc<Vec<u32>> (tri), visible: Vec<u32> (filtre),
+// clés de tri des noms en arènes par blocs (NameKeys), recalculées une fois par chargement.
 ```
 
 - Pas de `PathBuf` par entrée. Le chemin complet n'est construit (`OsString::from_wide`) qu'au
@@ -143,11 +150,8 @@ struct Folder {
   `HRESULT` et sont traduites en message lisible pour l'utilisateur dans `fx-ui`.
 - Pas de `unwrap()`/`expect()` hors tests et invariants prouvés (`clippy::unwrap_used` en deny
   hors tests).
-- `panic = "abort"` est demandé pour le binaire. Or `catch_unwind` exige `panic = "unwind"` :
-  **conflit**. Résolution retenue pour la phase 1 : profil release en `panic = "unwind"` (coût
-  mesuré sur la taille du binaire et le démarrage), workers sous `catch_unwind`, plus un hook
-  de panic qui journalise. Si la mesure montre un coût notable, on revient à `abort`, ce qui
-  impose que les workers ne paniquent jamais. Décision à consigner dans un ADR en phase 1.
+- Panics : `panic = "unwind"` en release, workers sous `catch_unwind`, hook de journalisation
+  ([ADR 0004](adr/0004-strategie-panic.md) : +2,3 Mo, pas d'effet mesurable au démarrage).
 - Journalisation `tracing` vers un fichier tournant dans `%LOCALAPPDATA%\<app>\logs`, niveau
   réglable par la configuration ou par `RUST_LOG`.
 - Configuration TOML dans `%APPDATA%\<app>\config.toml`. Un fichier corrompu donne les valeurs
@@ -170,7 +174,6 @@ struct Folder {
 | Risque | Phase | Parade |
 |---|---|---|
 | Rendu logiciel trop coûteux en 4K à haute fréquence | 3 | Mesure en 4K ; limiter les images par seconde ; option `gpu` |
-| Conflit `panic = "abort"` / isolation des panics | 1 | Mesure puis ADR (section 8) |
 | Interopérabilité drag-drop et menus Shell avec la boucle winit | 2 | Prototype isolé au début de la phase 2 |
 | Mise à jour du thème à chaud (palette Slint + DWM) | 1 | Test manuel en basculant le thème Windows |
 | Divulgation de noms par le service d'index | 5 | Filtrage par emprunt d'identité (ADR 0003) |
