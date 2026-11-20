@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
-  <assemblyIdentity type="win32" name="WinDir.Explorer" version="0.1.0.0" processorArchitecture="*"/>
-  <description>WinDir - explorateur de fichiers</description>
+  <assemblyIdentity type="win32" name="ExplorerMev.Explorer" version="0.1.0.0" processorArchitecture="*"/>
+  <description>ExplorerMev - explorateur de fichiers</description>
 
   <!-- Common Controls v6 : boîtes de dialogue et progression du Shell au style actuel. -->
   <dependency>

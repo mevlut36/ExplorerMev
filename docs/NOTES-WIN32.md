@@ -124,7 +124,7 @@ reproduire.
 
 ### Manifeste
 
-- Vérification de l'intégration : `mt.exe -inputresource:windir.exe;#1 -out:x.manifest`
+- Vérification de l'intégration : `mt.exe -inputresource:explorermev.exe;#1 -out:x.manifest`
   (SDK 10.0.26100). Le manifeste contient PerMonitorV2, `longPathAware`, `asInvoker` et
   Common Controls v6.
 
@@ -146,7 +146,7 @@ reproduire.
 - **Constat** : `SHParseDisplayName` et `SHCreateItemFromParsingName` échouent avec
   `E_INVALIDARG` (« Paramètre incorrect ») sur `C:/Users/…`, alors que les API du système de
   fichiers (`CreateFileW`…) acceptent ce chemin. Défaut trouvé par l'auto-test
-  (`windir --self-test`) : la création de dossier et le menu contextuel échouaient sur un
+  (`explorermev --self-test`) : la création de dossier et le menu contextuel échouaient sur un
   dossier passé avec des `/`.
 - **Parade** : tous les appels Shell passent par `fx_win::path::shell_path` (chemin absolu
   normalisé, sans `\?\`), et le chemin de départ est normalisé dans `fx-app`.
@@ -229,7 +229,7 @@ reproduire.
   `IInitializeWithFile`, `IInitializeWithItem`, `IInitializeWithStream` : chaque prévisualiseur
   n'en implémente qu'une partie. `CLSCTX_LOCAL_SERVER` est accepté en premier : le
   prévisualiseur PDF d'Edge (`{3A84F9C2-…}`) tourne alors hors processus, et un plantage ne
-  touche pas WinDir.
+  touche pas ExplorerMev.
 - La fenêtre enfant qui héberge l'aperçu est créée **par le thread STA de l'hôte d'aperçu**,
   pas par le thread d'interface : un prévisualiseur lent ne bloque pas l'interface (latence
   maximale mesurée pendant l'auto-test : 6,4 ms). Une fenêtre enfant d'un autre thread relie
@@ -357,13 +357,13 @@ reproduire.
   (`GetFullPathNameW`). Vérifié en lançant l'exécutable avec ces trois formes.
 - **Pas d'effet sur le shell** : `explorer.exe` reste le shell. Le détourner (Image File
   Execution Options, clé `Shell` de Winlogon) remplacerait la barre des tâches et le bureau, que
-  WinDir ne fournit pas : non pris en charge. Les programmes qui exécutent `explorer.exe
+  ExplorerMev ne fournit pas : non pris en charge. Les programmes qui exécutent `explorer.exe
   /select,…` directement ne passent pas par ces verbes.
-- **Dépendance au chemin** : la commande désigne le chemin absolu de `windir.exe` ; si le
+- **Dépendance au chemin** : la commande désigne le chemin absolu de `explorermev.exe` ; si le
   fichier disparaît, l'ouverture d'un dossier depuis les autres programmes échoue (Windows ne
   retombe pas sur l'Explorateur). D'où la confirmation qui affiche le chemin et la procédure
   de suppression manuelle dans le README.
 - **Effet réel vérifié** : option activée puis désactivée, `Start-Process`, `start` et
-  `ShellExecute` sans verbe sur un dossier ou un lecteur lancent bien `windir.exe` avec
+  `ShellExecute` sans verbe sur un dossier ou un lecteur lancent bien `explorermev.exe` avec
   l'argument `"<dossier>\."`, sans ouvrir de fenêtre de l'Explorateur. La touche Win+E n'a pas
   été essayée (frappe simulée exclue).

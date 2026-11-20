@@ -1,4 +1,4 @@
-# WinDir
+# ExplorerMev
 
 Explorateur de fichiers pour Windows 11, écrit en Rust, conçu pour être nettement plus rapide et
 plus léger que l'Explorateur Windows.
@@ -14,27 +14,27 @@ plus léger que l'Explorateur Windows.
 
 ## Installation
 
-WinDir n'a pas encore de version publiée : les livrables se produisent avec
+ExplorerMev n'a pas encore de version publiée : les livrables se produisent avec
 `packaging\package.ps1` (voir [Distribution](#distribution)).
 
 **Archive portable** (recommandée, aucun certificat requis) : décompresser
-`WinDir_<version>_x64_portable.zip` où l'on veut ; `windir.exe` est le seul fichier. Aucune
-installation : WinDir n'écrit que dans `%APPDATA%\WinDir` et `%LOCALAPPDATA%\WinDir` (et, si vous
+`ExplorerMev_<version>_x64_portable.zip` où l'on veut ; `explorermev.exe` est le seul fichier. Aucune
+installation : ExplorerMev n'écrit que dans `%APPDATA%\ExplorerMev` et `%LOCALAPPDATA%\ExplorerMev` (et, si vous
 activez « explorateur par défaut », des clés de votre compte dans le registre).
 
-**Paquet MSIX** : signé par un certificat **auto-signé** (`WinDir.cer`), que Windows ne connaît
+**Paquet MSIX** : signé par un certificat **auto-signé** (`ExplorerMev.cer`), que Windows ne connaît
 pas. Pour l'installer sur un poste, approuver d'abord ce certificat (invite administrateur),
 puis installer :
 
 ```powershell
-Import-Certificate -FilePath .\WinDir.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
-Add-AppxPackage .\WinDir_0.1.0_x64.msix
+Import-Certificate -FilePath .\ExplorerMev.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+Add-AppxPackage .\ExplorerMev_0.1.0_x64.msix
 ```
 
 Ces deux commandes n'ont pas été exécutées pendant le développement (voir
-[Limites connues](#limites-connues)). Pour désinstaller : `Get-AppxPackage WinDir | Remove-AppxPackage`,
+[Limites connues](#limites-connues)). Pour désinstaller : `Get-AppxPackage ExplorerMev | Remove-AppxPackage`,
 puis retirer le certificat (`Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -like
-"CN=WinDir*" | Remove-Item`). Une distribution publique exige un certificat de signature de code
+"CN=ExplorerMev*" | Remove-Item`). Une distribution publique exige un certificat de signature de code
 approuvé.
 
 **winget** : les manifestes de l'archive portable se génèrent avec
@@ -51,9 +51,9 @@ Prérequis :
 
 ```powershell
 cargo build --release
-target\release\windir.exe                       # profil utilisateur
-target\release\windir.exe "D:\Projets"          # dossier de départ
-target\release\windir.exe --help
+target\release\explorermev.exe                       # profil utilisateur
+target\release\explorermev.exe "D:\Projets"          # dossier de départ
+target\release\explorermev.exe --help
 ```
 
 ## Raccourcis
@@ -92,18 +92,18 @@ target\release\windir.exe --help
 
 ## Configuration
 
-`%APPDATA%\WinDir\config.toml`, créé avec ses commentaires au premier lancement : moteur de
+`%APPDATA%\ExplorerMev\config.toml`, créé avec ses commentaires au premier lancement : moteur de
 rendu, Mica, dossier de départ, éléments masqués, délai réseau (10 s par défaut), niveau du
 journal, affichage des nouveaux volets (`view = "details"` ou `"icons"`), indexation par la
 MFT (`index_mft`, désactivée par défaut). Une valeur invalide est ignorée avec un avertissement ; un fichier illisible n'est
-jamais écrasé. Les options de la ligne de commande sont prioritaires (`windir --help`).
+jamais écrasé. Les options de la ligne de commande sont prioritaires (`explorermev --help`).
 
 Les onglets (et leur double volet) sont restaurés au lancement sans dossier en argument
-(`%APPDATA%\WinDir\session.txt`) ; les favoris sont dans `%APPDATA%\WinDir\favoris.txt`.
+(`%APPDATA%\ExplorerMev\session.txt`) ; les favoris sont dans `%APPDATA%\ExplorerMev\favoris.txt`.
 
-**Explorateur par défaut** (désactivé par défaut) : commande « Utiliser WinDir comme explorateur
-par défaut… » de la palette (Ctrl+Maj+P), qui demande confirmation, ou `windir --default-explorer on`.
-Pour votre compte seulement, WinDir s'ouvre alors :
+**Explorateur par défaut** (désactivé par défaut) : commande « Utiliser ExplorerMev comme explorateur
+par défaut… » de la palette (Ctrl+Maj+P), qui demande confirmation, ou `explorermev --default-explorer on`.
+Pour votre compte seulement, ExplorerMev s'ouvre alors :
 
 - avec la touche **Windows+E** ;
 - quand un **dossier ou un lecteur** est ouvert depuis un autre programme, avec Win+R ou depuis le
@@ -115,23 +115,23 @@ ouvertes, leur navigation interne et les programmes qui lancent `explorer.exe` d
 (par exemple « Afficher dans le dossier » de certains logiciels) ne sont pas interceptés.
 
 Retour en arrière : « Rendre l'explorateur par défaut à Windows » (palette) ou
-`windir --default-explorer off` ; `windir --default-explorer status` affiche l'état. Seules les
-clés de votre compte posées par WinDir sont retirées (elles portent un marqueur) ; si un autre
-programme a déjà pris un de ces emplacements, WinDir n'y touche pas. **Ne déplacez pas et ne
-supprimez pas `windir.exe` tant que l'option est active** : les dossiers ouverts depuis les autres
+`explorermev --default-explorer off` ; `explorermev --default-explorer status` affiche l'état. Seules les
+clés de votre compte posées par ExplorerMev sont retirées (elles portent un marqueur) ; si un autre
+programme a déjà pris un de ces emplacements, ExplorerMev n'y touche pas. **Ne déplacez pas et ne
+supprimez pas `explorermev.exe` tant que l'option est active** : les dossiers ouverts depuis les autres
 programmes ne s'ouvriraient plus. Si cela arrive, supprimer à la main
 `HKCU\Software\Classes\Directory\shell\open`, `HKCU\Software\Classes\Drive\shell\open` et
-`HKCU\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}`. `windir --win-e on|off`
+`HKCU\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}`. `explorermev --win-e on|off`
 ne règle que la touche Win+E.
 
 **Recherche** (Ctrl+Maj+F) : index des noms de tous les volumes NTFS fixes, construit à la
 première recherche en parcourant les dossiers (sans droits, en priorité arrière-plan), puis tenu
 à jour par une surveillance des volumes. Il est gardé en cache dans
-`%LOCALAPPDATA%\WinDir\index` (relu en 0,2 s) et libéré de la mémoire après 5 minutes sans
+`%LOCALAPPDATA%\ExplorerMev\index` (relu en 0,2 s) et libéré de la mémoire après 5 minutes sans
 recherche. La commande « Indexation rapide par la MFT (administrateur)… » lance, après
 confirmation et invite de Windows, un petit assistant élevé qui lit la table des fichiers et son
 journal de modifications ; il ne transmet que les noms des dossiers que votre compte peut
-ouvrir, et s'arrête avec WinDir (détails : [ADR 0003](docs/adr/0003-strategie-index.md)).
+ouvrir, et s'arrête avec ExplorerMev (détails : [ADR 0003](docs/adr/0003-strategie-index.md)).
 
 La colonne « État » montre l'état OneDrive : nuage (en ligne seulement), coche (disponible
 localement), coche pleine (toujours conservé).
@@ -160,7 +160,7 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
   installé** : le certificat est auto-signé et n'est approuvé nulle part sur la machine de
   développement. Dans le paquet, « explorateur par défaut » est refusé (le registre y est isolé) et les
   réglages sont lus et écrits dans un emplacement privé du paquet
-  (`%LOCALAPPDATA%\Packages\…\LocalCache`), pas dans `%APPDATA%\WinDir`.
+  (`%LOCALAPPDATA%\Packages\…\LocalCache`), pas dans `%APPDATA%\ExplorerMev`.
 - **OneDrive** : jamais de lecture, de vignette ni d'aperçu d'un fichier « en ligne seulement »,
   par construction ; non vérifié sur des fichiers réels de ce type (aucun sur la machine de
   développement).
@@ -168,7 +168,7 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
   prévisualiseurs installés (non testés).
 - **Recherche** : volumes NTFS fixes seulement ; un fichier à liens physiques n'est indexé que
   sous un nom ; des droits resserrés après coup ne retirent pas les noms déjà indexés avant la
-  reconstruction suivante ; en mode parcours, les changements faits pendant que WinDir est
+  reconstruction suivante ; en mode parcours, les changements faits pendant qu'ExplorerMev est
   fermé n'apparaissent qu'à la reconstruction (cache de plus de 10 minutes).
 - **Vue icônes, plein écran, sauts aléatoires dans 100 000 éléments** : 81 i/s au lieu des
   60 i/s visés *constants* (quelques images lentes).
@@ -185,7 +185,7 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
 | `crates/fx-win` | Seul crate avec `unsafe` : listing, chemins `\\?\`, DWM, Shell, aperçus, tube nommé, MFT/USN, contrôle d'accès, locale |
 | `crates/fx-core` | Modèle sans interface : dossier compact, tri naturel, filtre, historique, chargeur, index de recherche et moteur |
 | `crates/fx-ui` | Interface Slint (style fluent, moteur de rendu logiciel) |
-| `crates/fx-app` | Binaire `windir.exe` : manifeste, icône, journalisation, options, assistant d'indexation élevé |
+| `crates/fx-app` | Binaire `explorermev.exe` : manifeste, icône, journalisation, options, assistant d'indexation élevé |
 | `packaging` | Icône, manifeste MSIX, `package.ps1`, manifestes winget |
 | `benches` | Benchmarks criterion et générateur de jeux de fichiers |
 | `prototypes/slint-scroll` | Prototype jetable de la phase 0 |
@@ -208,14 +208,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run --release -p fx-bench --bin gen-fixtures   # une fois
 cargo bench -p fx-bench
-target\release\windir.exe --self-test "$env:TEMP\windir-selftest"   # scénario fonctionnel, dossier vide
+target\release\explorermev.exe --self-test "$env:TEMP\explorermev-selftest"   # scénario fonctionnel, dossier vide
 ```
 
 ## Distribution
 
 ```powershell
 .\packaging\package.ps1                      # compile puis produit dist\ (MSIX, zip, .cer, SHA256SUMS.txt)
-.\packaging\package.ps1 -SkipBuild           # réutilise target\release\windir.exe
+.\packaging\package.ps1 -SkipBuild           # réutilise target\release\explorermev.exe
 .\packaging\package.ps1 -Thumbprint <empreinte> [-TimestampUrl <url>]   # vrai certificat de signature
 .\packaging\package.ps1 -InstallerUrl <url du zip publié>               # + manifestes winget dans dist\winget
 ```
@@ -225,5 +225,5 @@ certificat auto-signé dans le magasin **personnel** de l'utilisateur (`CurrentU
 l'approuve nulle part. L'icône se redessine avec `packaging\make-icons.ps1`. Avant de soumettre
 les manifestes à winget-pkgs : renseigner l'éditeur, la licence et les URL.
 
-Journal : `%LOCALAPPDATA%\WinDir\logs`, niveau réglé par la variable `WINDIR_LOG`
+Journal : `%LOCALAPPDATA%\ExplorerMev\logs`, niveau réglé par la variable `EXPLORERMEV_LOG`
 (`error`, `warn`, `info`, `debug`, `trace`, `off`).

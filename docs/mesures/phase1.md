@@ -10,9 +10,9 @@ Même banc de test qu'en phase 0 : Ryzen 5 5600X, 32 Go, Radeon RX 6600 XT, Wind
 cargo run --release -p fx-bench --bin gen-fixtures        # jeux de 1 000 / 10 000 / 100 000 entrées
 cargo bench -p fx-bench                                   # listing, clés de tri, tri, filtre
 cargo build --release
-target\release\windir.exe --bench-startup
-target\release\windir.exe --bench-open target\fixtures\n100000 --iterations 5
-target\release\windir.exe --bench-open target\fixtures\n1000 --iterations 3
+target\release\explorermev.exe --bench-startup
+target\release\explorermev.exe --bench-open target\fixtures\n100000 --iterations 5
+target\release\explorermev.exe --bench-open target\fixtures\n1000 --iterations 3
 ```
 
 Dans l'application, les temps d'ouverture partent de la demande de navigation. « Peint » signifie
@@ -48,7 +48,7 @@ Comparatif complet des méthodes de listing : [ADR 0002](../adr/0002-methode-lis
 
 ## Binaire
 
-`windir.exe` : 13,45 Mo (moteurs logiciel et femtovg inclus, `panic = "unwind"`, voir
+`explorermev.exe` : 13,45 Mo (moteurs logiciel et femtovg inclus, `panic = "unwind"`, voir
 [ADR 0004](../adr/0004-strategie-panic.md)).
 
 ## Limites

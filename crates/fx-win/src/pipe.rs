@@ -44,7 +44,7 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 use crate::handle::OwnedHandle;
 
 /// Préfixe des noms de tube de l'assistant ; suivi de 32 chiffres hexadécimaux.
-pub const PIPE_PREFIX: &str = r"\\.\pipe\WinDir-index-";
+pub const PIPE_PREFIX: &str = r"\\.\pipe\ExplorerMev-index-";
 
 /// Nom de tube valide pour l'assistant (vérifié par l'assistant avant toute action).
 pub fn is_valid_pipe_name(name: &str) -> bool {
@@ -360,7 +360,7 @@ mod tests {
         let n = random_pipe_name();
         assert!(is_valid_pipe_name(&n), "{n}");
         assert_ne!(n, random_pipe_name());
-        assert!(!is_valid_pipe_name(r"\\.\pipe\WinDir-index-123"));
+        assert!(!is_valid_pipe_name(r"\\.\pipe\ExplorerMev-index-123"));
         assert!(!is_valid_pipe_name(
             r"\\.\pipe\autre-0123456789abcdef0123456789abcdef"
         ));

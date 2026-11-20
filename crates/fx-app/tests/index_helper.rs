@@ -10,7 +10,7 @@ use fx_win::pipe::{PipeServer, launch_plain, random_pipe_name};
 
 #[test]
 fn unelevated_helper_reports_access_denied_and_exits() -> Result<(), Box<dyn std::error::Error>> {
-    let exe = Path::new(env!("CARGO_BIN_EXE_windir"));
+    let exe = Path::new(env!("CARGO_BIN_EXE_explorermev"));
     let name = random_pipe_name();
     let server = PipeServer::create(&name)?;
     let child = launch_plain(exe, &format!("--index-helper {name} {} C", std::process::id()))?;
@@ -36,7 +36,7 @@ fn unelevated_helper_reports_access_denied_and_exits() -> Result<(), Box<dyn std
 
 #[test]
 fn helper_rejects_bad_arguments() -> Result<(), Box<dyn std::error::Error>> {
-    let exe = env!("CARGO_BIN_EXE_windir");
+    let exe = env!("CARGO_BIN_EXE_explorermev");
     for args in [
         vec!["--index-helper"],
         vec!["--index-helper", r"\\.\pipe\autre", "1", "C"],

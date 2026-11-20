@@ -174,7 +174,7 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
     ),
     (
         Cmd::DefaultOn,
-        "Utiliser WinDir comme explorateur par défaut…",
+        "Utiliser ExplorerMev comme explorateur par défaut…",
         "",
     ),
     (Cmd::DefaultOff, "Rendre l'explorateur par défaut à Windows", ""),
@@ -796,7 +796,7 @@ impl App {
             return;
         }
         let Some(file) = self.session_file() else { return };
-        let mut out = format!("windir-session 1\nactif\t{}\n", self.active_tab.get());
+        let mut out = format!("explorermev-session 1\nactif\t{}\n", self.active_tab.get());
         for t in self.tabs.borrow().iter() {
             let path = |p: &Pane| {
                 p.current_path()
@@ -1051,11 +1051,11 @@ impl App {
             let ok = fx_win::shell::confirm(
                 owner,
                 "Indexation rapide (MFT)",
-                "WinDir peut lire directement la table des fichiers des volumes NTFS (MFT) et \
+                "ExplorerMev peut lire directement la table des fichiers des volumes NTFS (MFT) et \
                  leur journal de modifications : l'index est construit en quelques secondes et \
                  reste à jour sans surveiller les dossiers.\n\nCela demande les droits \
                  d'administration : Windows va afficher une demande de confirmation. Un petit \
-                 assistant tourne alors avec ces droits jusqu'à la fermeture de WinDir ; il ne \
+                 assistant tourne alors avec ces droits jusqu'à la fermeture d'ExplorerMev ; il ne \
                  fait que lire et transmettre les noms des fichiers, et seulement ceux des \
                  dossiers que votre compte peut ouvrir.\n\nContinuer ?",
             );
@@ -1285,7 +1285,7 @@ impl App {
 
     /// Option « explorateur par défaut » (désactivée par défaut) : Win+E et l'ouverture des
     /// dossiers depuis les autres programmes. L'activation est confirmée ; la désactivation ne
-    /// retire que ce que WinDir a posé.
+    /// retire que ce qu'ExplorerMev a posé.
     fn set_default_explorer(self: &Rc<Self>, on: bool) {
         if fx_win::process::is_packaged() {
             self.active_pane().flash_status(
@@ -1301,13 +1301,13 @@ impl App {
             let key = DefaultExplorer::default();
             let msg = if on {
                 match exe {
-                    Err(e) => format!("Chemin de WinDir introuvable : {e}"),
+                    Err(e) => format!("Chemin d'ExplorerMev introuvable : {e}"),
                     Ok(exe) => {
                         let ok = fx_win::shell::confirm(
                             owner,
                             "Explorateur par défaut",
                             &format!(
-                                "WinDir s'ouvrira à la place de l'Explorateur de fichiers :\n\
+                                "ExplorerMev s'ouvrira à la place de l'Explorateur de fichiers :\n\
                                  • la touche Windows+E ;\n\
                                  • les dossiers et lecteurs ouverts depuis un autre programme, \
                                  Win+R ou le menu Démarrer.\n\n\
@@ -1318,7 +1318,7 @@ impl App {
                                  Ne le déplacez pas et ne le supprimez pas tant que l'option est \
                                  active : les dossiers ne s'ouvriraient plus.\n\n\
                                  Pour revenir en arrière : commande « Rendre l'explorateur par \
-                                 défaut à Windows » (Ctrl+Maj+P) ou « windir --default-explorer off ».\n\n\
+                                 défaut à Windows » (Ctrl+Maj+P) ou « explorermev --default-explorer off ».\n\n\
                                  Continuer ?",
                                 exe.display()
                             ),
@@ -1327,7 +1327,7 @@ impl App {
                             return;
                         }
                         match key.enable(&exe) {
-                            Ok(()) => "WinDir est maintenant l'explorateur par défaut (Win+E et dossiers)."
+                            Ok(()) => "ExplorerMev est maintenant l'explorateur par défaut (Win+E et dossiers)."
                                 .to_string(),
                             Err(e) => e.to_string(),
                         }
@@ -1336,7 +1336,7 @@ impl App {
             } else {
                 match key.disable() {
                     Ok(true) => "L'Explorateur Windows est de nouveau l'explorateur par défaut.".to_string(),
-                    Ok(false) => "WinDir n'était pas l'explorateur par défaut : rien à changer.".to_string(),
+                    Ok(false) => "ExplorerMev n'était pas l'explorateur par défaut : rien à changer.".to_string(),
                     Err(e) => format!("Registre : {}", e.message()),
                 }
             };
@@ -2579,7 +2579,7 @@ fn test_bmp(w: u32, h: u32) -> Vec<u8> {
 
 /// Document PDF minimal (une page, un texte) pour l'auto-test de l'aperçu.
 fn test_pdf() -> Vec<u8> {
-    let content = "BT /F1 28 Tf 40 120 Td (WinDir - apercu PDF) Tj ET";
+    let content = "BT /F1 28 Tf 40 120 Td (ExplorerMev - apercu PDF) Tj ET";
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),

@@ -1,4 +1,4 @@
-//! WinDir — explorateur de fichiers pour Windows 11.
+//! ExplorerMev — explorateur de fichiers pour Windows 11.
 
 #![windows_subsystem = "windows"]
 
@@ -15,9 +15,9 @@ mod config;
 mod helper;
 
 const USAGE: &str = "\
-WinDir — explorateur de fichiers
+ExplorerMev — explorateur de fichiers
 
-Usage : windir [dossier] [options]
+Usage : explorermev [dossier] [options]
 
 Options :
   --renderer <software|gpu>   moteur de rendu (défaut : software)
@@ -33,13 +33,13 @@ Options :
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
   --out <fichier>             écrit aussi le rapport de mesure dans <fichier>
   --default-explorer <on|off|status>
-                              WinDir explorateur par défaut (Win+E et ouverture des dossiers), puis quitte
-  --win-e <on|off|status>     seulement Win+E ouvre WinDir (on) ou l'Explorateur (off), puis quitte
+                              ExplorerMev explorateur par défaut (Win+E et ouverture des dossiers), puis quitte
+  --win-e <on|off|status>     seulement Win+E ouvre ExplorerMev (on) ou l'Explorateur (off), puis quitte
   -V, --version               affiche la version
   -h, --help                  affiche cette aide
 
-Configuration : %APPDATA%\\WinDir\\config.toml (les options ci-dessus sont prioritaires)
-Journal : %LOCALAPPDATA%\\WinDir\\logs (niveau : log_level, ou variable WINDIR_LOG)";
+Configuration : %APPDATA%\\ExplorerMev\\config.toml (les options ci-dessus sont prioritaires)
+Journal : %LOCALAPPDATA%\\ExplorerMev\\logs (niveau : log_level, ou variable EXPLORERMEV_LOG)";
 
 struct Args {
     path: Option<PathBuf>,
@@ -164,20 +164,20 @@ fn default_explorer(action: &str) -> ExitCode {
             "on" => {
                 let exe = std::env::current_exe()?;
                 key.enable(&exe)?;
-                format!("WinDir est l'explorateur par défaut : {}", exe.display())
+                format!("ExplorerMev est l'explorateur par défaut : {}", exe.display())
             }
             "off" => {
                 if key.disable()? {
                     "L'Explorateur Windows est de nouveau l'explorateur par défaut.".into()
                 } else {
-                    "WinDir n'était pas l'explorateur par défaut : rien à changer.".into()
+                    "ExplorerMev n'était pas l'explorateur par défaut : rien à changer.".into()
                 }
             }
             _ => match key.state()? {
                 DefaultState::Windows => "Explorateur par défaut : Windows.".into(),
-                DefaultState::WinDir(p) => format!("Explorateur par défaut : WinDir ({}).", p.display()),
+                DefaultState::ExplorerMev(p) => format!("Explorateur par défaut : ExplorerMev ({}).", p.display()),
                 DefaultState::Partial => {
-                    "Explorateur par défaut : partiellement WinDir (relancer --default-explorer on ou off)."
+                    "Explorateur par défaut : partiellement ExplorerMev (relancer --default-explorer on ou off)."
                         .into()
                 }
                 DefaultState::Other(what) => format!("Explorateur par défaut : autre programme ({what})."),
@@ -218,12 +218,12 @@ fn win_e(action: &str) -> ExitCode {
                 if key.disable()? {
                     "Win+E ouvre de nouveau l'Explorateur.".into()
                 } else {
-                    "Win+E n'était pas associé à WinDir : rien à changer.".into()
+                    "Win+E n'était pas associé à ExplorerMev : rien à changer.".into()
                 }
             }
             _ => match key.state()? {
                 WinEState::Default => "Win+E : Explorateur (comportement de Windows).".into(),
-                WinEState::WinDir(p) => format!("Win+E : WinDir ({}).", p.display()),
+                WinEState::ExplorerMev(p) => format!("Win+E : ExplorerMev ({}).", p.display()),
                 WinEState::Other(c) => format!("Win+E : autre programme ({c})."),
             },
         })
@@ -241,12 +241,12 @@ fn win_e(action: &str) -> ExitCode {
 }
 
 fn log_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("WinDir").join("logs"))
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("ExplorerMev").join("logs"))
 }
 
 fn init_logging(configured: &str) -> Option<WorkerGuard> {
-    // La variable WINDIR_LOG l'emporte sur la configuration.
-    let env = std::env::var("WINDIR_LOG").ok();
+    // La variable EXPLORERMEV_LOG l'emporte sur la configuration.
+    let env = std::env::var("EXPLORERMEV_LOG").ok();
     let level = match env.as_deref().unwrap_or(configured) {
         "error" => LevelFilter::ERROR,
         "warn" => LevelFilter::WARN,
@@ -259,7 +259,7 @@ fn init_logging(configured: &str) -> Option<WorkerGuard> {
     std::fs::create_dir_all(&dir).ok()?;
     let appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("windir")
+        .filename_prefix("explorermev")
         .filename_suffix("log")
         .max_log_files(7)
         .build(&dir)
@@ -284,9 +284,9 @@ fn install_panic_hook() {
         if thread.name() == Some("main") {
             let logs = log_dir().map(|d| d.display().to_string()).unwrap_or_default();
             fx_win::shell::error_box(
-                "WinDir",
+                "ExplorerMev",
                 &format!(
-                    "WinDir a rencontré une erreur interne et doit se fermer.\n\nDétails dans le journal :\n{logs}"
+                    "ExplorerMev a rencontré une erreur interne et doit se fermer.\n\nDétails dans le journal :\n{logs}"
                 ),
             );
         }
@@ -322,7 +322,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.version {
-        println!("WinDir {}", env!("CARGO_PKG_VERSION"));
+        println!("ExplorerMev {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     if let Some(action) = &args.win_e {
@@ -407,11 +407,11 @@ fn main() -> ExitCode {
         startup_warning: warnings.first().cloned(),
         // Sans dossier explicite, on reprend les onglets de la session précédente.
         restore_session: !benching && explicit_path.is_none(),
-        data_dir: std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("WinDir")),
+        data_dir: std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("ExplorerMev")),
         // Les modes de mesure ont leur propre cache (reproductibilité, pas de mélange).
         index_dir: std::env::var_os("LOCALAPPDATA").map(|d| {
             PathBuf::from(d)
-                .join("WinDir")
+                .join("ExplorerMev")
                 .join(if benching { "index-mesure" } else { "index" })
         }),
         bench,

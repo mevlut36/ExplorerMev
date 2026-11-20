@@ -73,8 +73,8 @@ Captures (fenêtre de l'application seulement) : double volet, aperçu PDF, vue 
 Testée sur une clé de test de `HKCU` (activation, mise à jour, désactivation, refus si un autre
 programme a pris Win+E, désactivation sans effet sur la clé d'un autre programme), supprimée
 ensuite. **Non activée sur la machine de développement** (désactivée par défaut, activation
-réservée à l'utilisateur) : le lancement effectif de WinDir par Win+E n'a donc pas été observé.
-`windir --win-e status` confirme l'état d'origine (« Explorateur »).
+réservée à l'utilisateur) : le lancement effectif d'ExplorerMev par Win+E n'a donc pas été observé.
+`explorermev --win-e status` confirme l'état d'origine (« Explorateur »).
 
 ## Tests
 

@@ -76,7 +76,7 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 | `fx-search-build` + pool `fx-index-N` (priorité arrière-plan, moitié des cœurs) | construction d'un index par parcours des dossiers |
 | `fx-watch-tree` (un par volume indexé) | surveillance récursive de la racine du volume (noms et attributs) |
 | `fx-mft` (sur demande) | tube vers l'assistant élevé ; relaie ses trames au moteur |
-| processus `windir --index-helper` (élevé, sur demande) | lit la MFT puis le journal USN, filtre par droits d'accès, écrit dans le tube ; ne lit rien |
+| processus `explorermev --index-helper` (élevé, sur demande) | lit la MFT puis le journal USN, filtre par droits d'accès, écrit dans le tube ; ne lit rien |
 | `fx-preview` (hôte d'aperçu, STA OLE) | prévisualiseurs du Shell (`IPreviewHandler`) dans une fenêtre enfant, vignettes du volet d'aperçu |
 | `fx-preview-text` (un par aperçu) | lecture des 64 premiers Kio d'un fichier texte |
 | pool `rayon` (taille de dossiers) | parcours récursif annulable, sans suivre les points de réanalyse |

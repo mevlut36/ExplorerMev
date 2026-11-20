@@ -132,13 +132,13 @@ fn create_window() -> windows::core::Result<HWND> {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
-            lpszClassName: w!("WinDirShellHost"),
+            lpszClassName: w!("ExplorerMevShellHost"),
             ..Default::default()
         };
         RegisterClassExW(&class);
         CreateWindowExW(
             WS_EX_TOOLWINDOW,
-            w!("WinDirShellHost"),
+            w!("ExplorerMevShellHost"),
             w!(""),
             WS_POPUP,
             0,

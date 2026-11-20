@@ -1,11 +1,11 @@
-//! Option « Remplacer Win+E » : la touche Windows+E ouvre WinDir au lieu de l'Explorateur.
+//! Option « Remplacer Win+E » : la touche Windows+E ouvre ExplorerMev au lieu de l'Explorateur.
 //!
 //! Windows lance la commande `opennewwindow` de l'objet « Ce PC »
 //! (`{52205fd8-5dfb-447d-801a-d0b52f2e83e1}`). Une commande par utilisateur sous
 //! `HKCU\Software\Classes\CLSID\{…}\shell\opennewwindow\command` (valeur par défaut = programme,
 //! `DelegateExecute` vide) prend le pas sur celle du système. Rien n'est écrit hors de HKCU ;
-//! désactiver supprime la clé `CLSID\{…}` que WinDir a créée, et seulement si elle désigne
-//! WinDir : l'état d'origine est rétabli.
+//! désactiver supprime la clé `CLSID\{…}` qu'ExplorerMev a créée, et seulement si elle désigne
+//! ExplorerMev : l'état d'origine est rétabli.
 
 use std::path::{Path, PathBuf};
 
@@ -18,23 +18,23 @@ use windows::core::{HSTRING, PCWSTR};
 
 /// Objet « Ce PC » dont Windows ouvre une nouvelle fenêtre sur Win+E.
 const THIS_PC_CLSID: &str = "{52205fd8-5dfb-447d-801a-d0b52f2e83e1}";
-/// Marqueur posé sur la clé créée par WinDir.
-const OWNER_VALUE: &str = "WinDir";
+/// Marqueur posé sur la clé créée par ExplorerMev.
+const OWNER_VALUE: &str = "ExplorerMev";
 
 /// État de Win+E pour l'utilisateur courant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WinEState {
     /// Comportement de Windows (Explorateur).
     Default,
-    /// Remplacé par WinDir (programme indiqué).
-    WinDir(PathBuf),
-    /// Remplacé par un autre programme : WinDir n'y touche pas.
+    /// Remplacé par ExplorerMev (programme indiqué).
+    ExplorerMev(PathBuf),
+    /// Remplacé par un autre programme : ExplorerMev n'y touche pas.
     Other(String),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum WinEError {
-    #[error("Win+E est déjà associé à un autre programme ({0}) ; WinDir ne le remplace pas.")]
+    #[error("Win+E est déjà associé à un autre programme ({0}) ; ExplorerMev ne le remplace pas.")]
     TakenByOther(String),
     #[error("Registre : {0}")]
     Registry(#[from] windows::core::Error),
@@ -134,7 +134,7 @@ impl WinEKey {
         Ok(if command.trim().is_empty() {
             WinEState::Default
         } else if ours {
-            WinEState::WinDir(PathBuf::from(unquote(&command)))
+            WinEState::ExplorerMev(PathBuf::from(unquote(&command)))
         } else {
             WinEState::Other(command)
         })
@@ -185,9 +185,9 @@ impl WinEKey {
         Ok(())
     }
 
-    /// Rend Win+E à l'Explorateur, si (et seulement si) WinDir l'avait pris.
+    /// Rend Win+E à l'Explorateur, si (et seulement si) ExplorerMev l'avait pris.
     pub fn disable(&self) -> windows::core::Result<bool> {
-        if !matches!(self.state()?, WinEState::WinDir(_)) {
+        if !matches!(self.state()?, WinEState::ExplorerMev(_)) {
             return Ok(false);
         }
         self.delete_tree(&self.clsid_key())?;

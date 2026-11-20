@@ -32,12 +32,12 @@ avec les processus non élevés).
    - **libéré de la mémoire après 5 minutes sans recherche** (cache écrit d'abord s'il a
      changé), **relu dès l'ouverture** de la recherche ; les changements reçus entre-temps sont
      notés et rejoués.
-2. **Cache disque** par volume (`%LOCALAPPDATA%\WinDir\index\X.idx`), vérifié borne par borne à
+2. **Cache disque** par volume (`%LOCALAPPDATA%\ExplorerMev\index\X.idx`), vérifié borne par borne à
    la lecture (un fichier abîmé est ignoré) et rattaché au numéro de série du volume.
 3. **Source par défaut : parcours sans droits**, en priorité « arrière-plan » (processeur et
    disque) avec la moitié des cœurs, relancé si le cache a plus de 10 minutes. Mise à jour par
    surveillance récursive de chaque volume.
-4. **Source rapide, sur demande : assistant élevé** `windir --index-helper`, lancé par une
+4. **Source rapide, sur demande : assistant élevé** `explorermev --index-helper`, lancé par une
    commande confirmée de la palette (ou le réglage `index_mft = true`) :
    - **sens unique** : l'interface crée le tube en **lecture seule pour elle**
      (`PIPE_ACCESS_INBOUND`) ; l'assistant ne peut qu'écrire, il ne reçoit aucune commande ;

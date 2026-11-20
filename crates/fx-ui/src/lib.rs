@@ -51,9 +51,9 @@ pub struct Options {
     pub startup_warning: Option<String>,
     /// Restaurer (et enregistrer) les onglets de la session précédente.
     pub restore_session: bool,
-    /// Dossier des données de l'application (session, favoris) : `%APPDATA%\WinDir`.
+    /// Dossier des données de l'application (session, favoris) : `%APPDATA%\ExplorerMev`.
     pub data_dir: Option<PathBuf>,
-    /// Cache de l'index de recherche : `%LOCALAPPDATA%\WinDir\index`.
+    /// Cache de l'index de recherche : `%LOCALAPPDATA%\ExplorerMev\index`.
     pub index_dir: Option<PathBuf>,
     /// Indexer par la MFT (assistant élevé) dès le démarrage de la recherche.
     pub index_mft: bool,

@@ -1,19 +1,19 @@
-//! « Explorateur par défaut » : WinDir s'ouvre à la place de l'Explorateur de fichiers quand
+//! « Explorateur par défaut » : ExplorerMev s'ouvre à la place de l'Explorateur de fichiers quand
 //! l'utilisateur ou un autre programme ouvre un dossier.
 //!
 //! **Ce que cela change** (pour le compte courant seulement, sous `HKCU\Software\Classes`) :
 //! - `Win+E` : voir [`crate::win_e`] ;
 //! - le verbe `open` des classes `Directory` et `Drive` : ouvrir un dossier ou un lecteur
-//!   depuis un autre programme, `Win+R`, le menu Démarrer… lance `windir.exe "<dossier>"`.
+//!   depuis un autre programme, `Win+R`, le menu Démarrer… lance `explorermev.exe "<dossier>"`.
 //!
 //! **Ce que cela ne change pas** : `explorer.exe` reste le shell de Windows (barre des tâches,
-//! bureau, menu Démarrer). Remplacer le shell n'est pas pris en charge : WinDir n'en est pas un.
+//! bureau, menu Démarrer). Remplacer le shell n'est pas pris en charge : ExplorerMev n'en est pas un.
 //! La navigation à l'intérieur d'une fenêtre de l'Explorateur déjà ouverte n'est pas
 //! interceptée non plus.
 //!
-//! **Réversible** : chaque clé posée porte un marqueur (la valeur `WinDir`, chemin du
+//! **Réversible** : chaque clé posée porte un marqueur (la valeur `ExplorerMev`, chemin du
 //! programme) ; désactiver ne supprime que ce qui porte le marqueur, et la valeur par défaut de
-//! `Directory\shell` seulement si c'est celle que WinDir a écrite. Si un autre programme a déjà
+//! `Directory\shell` seulement si c'est celle qu'ExplorerMev a écrite. Si un autre programme a déjà
 //! pris l'un de ces emplacements, rien n'est modifié.
 
 use std::path::{Path, PathBuf};
@@ -24,9 +24,9 @@ use crate::win_e::{
 
 /// Classes dont le verbe `open` est redirigé.
 const CLASSES: [&str; 2] = ["Directory", "Drive"];
-/// Marqueur posé sur la clé `open` créée par WinDir (valeur = chemin du programme).
-const MARKER: &str = "WinDir";
-/// Verbe par défaut que WinDir écrit sur `<classe>\shell`.
+/// Marqueur posé sur la clé `open` créée par ExplorerMev (valeur = chemin du programme).
+const MARKER: &str = "ExplorerMev";
+/// Verbe par défaut qu'ExplorerMev écrit sur `<classe>\shell`.
 const DEFAULT_VERB: &str = "open";
 
 /// État global de l'option.
@@ -34,11 +34,11 @@ const DEFAULT_VERB: &str = "open";
 pub enum DefaultState {
     /// Comportement de Windows.
     Windows,
-    /// Win+E et dossiers ouvrent WinDir (programme indiqué).
-    WinDir(PathBuf),
+    /// Win+E et dossiers ouvrent ExplorerMev (programme indiqué).
+    ExplorerMev(PathBuf),
     /// Une partie seulement est active (réparable en réactivant ou désactivant).
     Partial,
-    /// Un autre programme occupe un des emplacements : WinDir n'y touche pas.
+    /// Un autre programme occupe un des emplacements : ExplorerMev n'y touche pas.
     Other(String),
 }
 
@@ -93,7 +93,7 @@ impl DefaultExplorer {
             None => String::new(),
         };
         Ok(match WinEKey::read(&open, MARKER)? {
-            Some(path) => WinEState::WinDir(PathBuf::from(path)),
+            Some(path) => WinEState::ExplorerMev(PathBuf::from(path)),
             None => WinEState::Other(if command.is_empty() {
                 format!("verbe open de {class}")
             } else {
@@ -114,7 +114,7 @@ impl DefaultExplorer {
         let ours: Vec<&PathBuf> = parts
             .iter()
             .filter_map(|p| {
-                if let WinEState::WinDir(path) = p {
+                if let WinEState::ExplorerMev(path) = p {
                     Some(path)
                 } else {
                     None
@@ -123,7 +123,7 @@ impl DefaultExplorer {
             .collect();
         Ok(match ours.as_slice() {
             [] => DefaultState::Windows,
-            all if all.len() == parts.len() => DefaultState::WinDir(all[0].clone()),
+            all if all.len() == parts.len() => DefaultState::ExplorerMev(all[0].clone()),
             _ => DefaultState::Partial,
         })
     }
@@ -148,7 +148,7 @@ impl DefaultExplorer {
             set_string(&shell, "", DEFAULT_VERB)?;
             let open = create_key(&self.open_key(class))?;
             set_string(&open, MARKER, &exe_text)?;
-            set_string(&open, "MUIVerb", "Ouvrir avec WinDir")?;
+            set_string(&open, "MUIVerb", "Ouvrir avec ExplorerMev")?;
             let command: Key = create_key(&format!(r"{}\command", self.open_key(class)))?;
             // `\.` : un lecteur arrive comme « D:\ », et `"D:\"` serait lu comme un guillemet
             // échappé ; `D:\\.` est normalisé en `D:\` par Windows.
@@ -163,11 +163,11 @@ impl DefaultExplorer {
     pub fn disable(&self) -> windows::core::Result<bool> {
         let mut changed = self.win_e().disable()?;
         for class in CLASSES {
-            if !matches!(self.class_state(class)?, WinEState::WinDir(_)) {
+            if !matches!(self.class_state(class)?, WinEState::ExplorerMev(_)) {
                 continue;
             }
             delete_tree(&self.open_key(class))?;
-            // La valeur par défaut de `shell` n'est retirée que si c'est celle que WinDir a
+            // La valeur par défaut de `shell` n'est retirée que si c'est celle qu'ExplorerMev a
             // écrite (jamais une valeur qui existait avant).
             if let Some(shell) = writable(&self.shell_key(class))? {
                 let current = crate::win_e::WinEKey::read(&shell, "")?.unwrap_or_default();
@@ -228,7 +228,7 @@ mod tests {
     }
 
     fn fixture(tag: &str) -> DefaultExplorer {
-        DefaultExplorer::with_base(format!(r"Software\WinDir-test-{tag}-{}", std::process::id()))
+        DefaultExplorer::with_base(format!(r"Software\ExplorerMev-test-{tag}-{}", std::process::id()))
     }
 
     #[test]
@@ -241,18 +241,18 @@ mod tests {
             let neighbour = create_key(&format!(r"{}\Directory\shell\autre\command", d.base))?;
             set_string(&neighbour, "", r"C:\autre.exe")?;
 
-            let exe = Path::new(r"C:\Outils\WinDir\windir.exe");
+            let exe = Path::new(r"C:\Outils\ExplorerMev\explorermev.exe");
             d.enable(exe)?;
-            assert_eq!(d.state()?, DefaultState::WinDir(exe.to_path_buf()));
+            assert_eq!(d.state()?, DefaultState::ExplorerMev(exe.to_path_buf()));
             for class in CLASSES {
                 assert_eq!(read_default(&d.shell_key(class)).as_deref(), Some("open"));
                 let cmd = read_default(&format!(r"{}\command", d.open_key(class))).ok_or("commande")?;
-                assert_eq!(cmd, r#""C:\Outils\WinDir\windir.exe" "%1\.""#);
+                assert_eq!(cmd, r#""C:\Outils\ExplorerMev\explorermev.exe" "%1\.""#);
             }
             // Réactiver (mise à jour du chemin) est permis.
-            let moved = Path::new(r"D:\WinDir\windir.exe");
+            let moved = Path::new(r"D:\ExplorerMev\explorermev.exe");
             d.enable(moved)?;
-            assert_eq!(d.state()?, DefaultState::WinDir(moved.to_path_buf()));
+            assert_eq!(d.state()?, DefaultState::ExplorerMev(moved.to_path_buf()));
 
             assert!(d.disable()?);
             assert_eq!(d.state()?, DefaultState::Windows);
@@ -322,13 +322,13 @@ mod tests {
     fn partial_state_is_reported_and_repaired() -> Result<(), Box<dyn std::error::Error>> {
         let d = fixture("part");
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let exe = Path::new(r"C:\w\windir.exe");
+            let exe = Path::new(r"C:\w\explorermev.exe");
             d.enable(exe)?;
             // Quelqu'un supprime à la main le verbe de Drive : l'état devient « partiel ».
             delete_tree(&d.open_key("Drive"))?;
             assert_eq!(d.state()?, DefaultState::Partial);
             d.enable(exe)?;
-            assert_eq!(d.state()?, DefaultState::WinDir(exe.to_path_buf()));
+            assert_eq!(d.state()?, DefaultState::ExplorerMev(exe.to_path_buf()));
             assert!(d.disable()?);
             assert_eq!(d.state()?, DefaultState::Windows);
             Ok(())

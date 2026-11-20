@@ -17,7 +17,7 @@ listing tue tout le processus. La seconde exigence est donc impossible à tenir.
 
 Même code, profil release (LTO fat, codegen-units 1, strip), seule la stratégie change :
 
-| | Taille de `windir.exe` | Démarrage (1ʳᵉ image, 5 passages) |
+| | Taille de `explorermev.exe` | Démarrage (1ʳᵉ image, 5 passages) |
 |---|---|---|
 | `abort` | 11,15 Mo | 64–91 ms |
 | `unwind` | 13,45 Mo (+2,3 Mo) | 64–86 ms |

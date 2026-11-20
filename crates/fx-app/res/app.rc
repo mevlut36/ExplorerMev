@@ -22,12 +22,12 @@ BEGIN
     BEGIN
         BLOCK "040C04B0"
         BEGIN
-            VALUE "ProductName", "WinDir"
-            VALUE "FileDescription", "WinDir - explorateur de fichiers"
+            VALUE "ProductName", "ExplorerMev"
+            VALUE "FileDescription", "ExplorerMev - explorateur de fichiers"
             VALUE "FileVersion", VER_STR
             VALUE "ProductVersion", VER_STR
-            VALUE "InternalName", "windir"
-            VALUE "OriginalFilename", "windir.exe"
+            VALUE "InternalName", "explorermev"
+            VALUE "OriginalFilename", "explorermev.exe"
         END
     END
     BLOCK "VarFileInfo"

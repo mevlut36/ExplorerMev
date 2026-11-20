@@ -15,8 +15,8 @@ param(
     [Parameter(Mandatory)][string]$InstallerUrl,
     [Parameter(Mandatory)][string]$Zip,
     [Parameter(Mandatory)][string]$OutDir,
-    [string]$Identifier = "WinDir.WinDir",
-    [string]$Publisher = "WinDir",
+    [string]$Identifier = "ExplorerMev.ExplorerMev",
+    [string]$Publisher = "ExplorerMev",
     [string]$License = "Proprietary"
 )
 $ErrorActionPreference = "Stop"
@@ -44,8 +44,8 @@ MinimumOSVersion: 10.0.22000.0
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
-- RelativeFilePath: windir.exe
-  PortableCommandAlias: windir
+- RelativeFilePath: explorermev.exe
+  PortableCommandAlias: explorermev
 Installers:
 - Architecture: x64
   InstallerUrl: $InstallerUrl
@@ -60,11 +60,11 @@ PackageIdentifier: $Identifier
 PackageVersion: $Version
 PackageLocale: fr-FR
 Publisher: $Publisher
-PackageName: WinDir
+PackageName: ExplorerMev
 License: $License
 ShortDescription: Explorateur de fichiers rapide et léger pour Windows 11, avec recherche instantanée.
 Description: >-
-  WinDir est un explorateur de fichiers écrit en Rust : démarrage en moins de 100 ms, onglets,
+  ExplorerMev est un explorateur de fichiers écrit en Rust : démarrage en moins de 100 ms, onglets,
   double volet, aperçu, vue icônes avec vignettes, palette de commandes et recherche par nom sur
   tous les volumes NTFS.
 Tags:

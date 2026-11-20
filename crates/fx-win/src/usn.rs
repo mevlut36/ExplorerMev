@@ -2,7 +2,7 @@
 //! `FSCTL_READ_USN_JOURNAL`) : l'index de recherche se construit sans parcourir les dossiers.
 //!
 //! Ouvrir le volume (`\\.\C:`) exige les droits d'administration : ces fonctions sont
-//! appelées par l'assistant d'indexation élevé (`windir --index-helper`), jamais par
+//! appelées par l'assistant d'indexation élevé (`explorermev --index-helper`), jamais par
 //! l'interface. Les enregistrements sont décodés depuis des octets (code sûr), avec contrôle de
 //! chaque longueur.
 

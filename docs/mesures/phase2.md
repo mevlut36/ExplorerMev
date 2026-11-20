@@ -19,7 +19,7 @@ Shell, des deux threads d'icônes et du volet de navigation. Il reste très en d
 
 ## Auto-test fonctionnel
 
-`windir --self-test <dossier vide>` exécute un scénario dans l'application réelle, sans
+`explorermev --self-test <dossier vide>` exécute un scénario dans l'application réelle, sans
 aucune entrée souris ou clavier synthétique. Les étapes appellent les mêmes fonctions que les
 callbacks de l'interface. Résultat : **11 vérifications sur 11** :
 

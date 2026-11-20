@@ -6,7 +6,7 @@ version.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "windir"
+name = "explorermev"
 path = "src/main.rs"
 
 [dependencies]

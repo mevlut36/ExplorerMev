@@ -1,4 +1,4 @@
-//! Configuration TOML dans `%APPDATA%\WinDir\config.toml`.
+//! Configuration TOML dans `%APPDATA%\ExplorerMev\config.toml`.
 //!
 //! Tolérante : un fichier absent est créé avec un modèle commenté ; un fichier illisible donne
 //! les valeurs par défaut (sans être écrasé) ; une valeur invalide ne remplace que son propre
@@ -44,7 +44,7 @@ impl Default for Config {
 }
 
 /// Modèle écrit au premier lancement.
-pub const TEMPLATE: &str = r#"# Configuration de WinDir. Une valeur invalide est ignorée (valeur par défaut) avec un
+pub const TEMPLATE: &str = r#"# Configuration d'ExplorerMev. Une valeur invalide est ignorée (valeur par défaut) avec un
 # avertissement ; supprimer ce fichier le recrée avec les valeurs par défaut.
 
 # Moteur de rendu : "software" (léger, défaut) ou "gpu" (OpenGL, plus de mémoire).
@@ -62,7 +62,7 @@ show_hidden = false
 # Abandon d'un dossier qui ne répond pas (partage réseau injoignable), en secondes.
 network_timeout_secs = 10
 
-# Niveau du journal (%LOCALAPPDATA%\WinDir\logs) : "error", "warn", "info", "debug", "trace", "off".
+# Niveau du journal (%LOCALAPPDATA%\ExplorerMev\logs) : "error", "warn", "info", "debug", "trace", "off".
 log_level = "info"
 
 # Affichage des nouveaux volets : "details" (défaut) ou "icons" (Ctrl+Maj+V bascule).
@@ -87,7 +87,7 @@ const KNOWN: [&str; 8] = [
 ];
 
 pub fn default_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("WinDir").join("config.toml"))
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("ExplorerMev").join("config.toml"))
 }
 
 /// Lit la configuration depuis `path`. Renvoie toujours une configuration utilisable et la
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn missing_file_creates_template() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("WinDir").join("config.toml");
+        let path = dir.path().join("ExplorerMev").join("config.toml");
         let (cfg, w) = load(&path);
         assert_eq!(cfg, Config::default());
         assert!(w.is_empty());

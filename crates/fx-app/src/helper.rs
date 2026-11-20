@@ -1,4 +1,4 @@
-//! Assistant d'indexation élevé : `windir --index-helper <tube> <pid parent> <lettres>`.
+//! Assistant d'indexation élevé : `explorermev --index-helper <tube> <pid parent> <lettres>`.
 //!
 //! Lancé par l'interface avec élévation (invite UAC), à la demande de l'utilisateur. Il fait le
 //! strict minimum avec ses droits :
