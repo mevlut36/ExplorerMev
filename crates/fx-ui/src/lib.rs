@@ -53,6 +53,8 @@ pub struct Options {
     pub restore_session: bool,
     /// Dossier des données de l'application (session, favoris) : `%APPDATA%\WinDir`.
     pub data_dir: Option<PathBuf>,
+    /// Cache de l'index de recherche : `%LOCALAPPDATA%\WinDir\index`.
+    pub index_dir: Option<PathBuf>,
     pub bench: Option<BenchMode>,
     /// Instant de début de `main`, pour l'instrumentation du démarrage.
     pub main_start: Instant,

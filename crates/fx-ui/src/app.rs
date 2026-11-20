@@ -26,7 +26,7 @@ use crate::model::FolderModel;
 use crate::nav::NavEntry;
 use crate::ops::Job;
 use crate::pane::{Pane, post_pane, same_path, with_pane};
-use crate::{MainWindow, NavItem, Options, PaletteItem, TabItem, UiError};
+use crate::{MainWindow, NavItem, Options, PaletteItem, SearchItem, TabItem, UiError};
 
 /// Modes de mesure (`--bench-startup`, `--bench-open`…).
 #[derive(Debug, Clone)]
@@ -43,6 +43,9 @@ pub enum BenchMode {
     SelfTest { out: Option<PathBuf> },
     /// Défilement automatisé du dossier de départ (molette, rapide, sauts), puis quitte.
     Scroll { maximized: bool, out: Option<PathBuf> },
+    /// Recherche globale : frappe simulée au rythme d'un utilisateur, mémoire avec l'index
+    /// chargé puis libéré, relecture du cache ; puis quitte.
+    Search { out: Option<PathBuf> },
 }
 
 thread_local! {
@@ -128,6 +131,7 @@ enum Cmd {
     RemoveFavorite,
     WinEOn,
     WinEOff,
+    Search,
 }
 
 const COMMANDS: &[(Cmd, &str, &str)] = &[
@@ -161,6 +165,7 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::FolderSize, "Calculer la taille des dossiers", "Ctrl+Maj+S"),
     (Cmd::AddFavorite, "Ajouter aux favoris", "Ctrl+D"),
     (Cmd::RemoveFavorite, "Retirer des favoris", ""),
+    (Cmd::Search, "Rechercher sur l'ordinateur", "Ctrl+Maj+F"),
     (Cmd::WinEOn, "Remplacer Win+E par WinDir…", ""),
     (Cmd::WinEOff, "Rendre Win+E à l'Explorateur", ""),
 ];
@@ -187,6 +192,19 @@ pub(crate) struct App {
     suggest_seq: Cell<u64>,
     session_seq: Cell<u64>,
     palette: RefCell<Vec<Cmd>>,
+    index_dir: Option<PathBuf>,
+    /// Moteur de recherche, démarré à la première ouverture de la recherche.
+    search: RefCell<Option<fx_core::search_engine::Engine>>,
+    search_gen: Cell<u64>,
+    search_sent: Cell<Option<Instant>>,
+    /// Une requête attend ses résultats.
+    search_waiting: Cell<bool>,
+    search_rows: RefCell<Vec<fx_core::search_engine::SearchRow>>,
+    search_index_status: RefCell<String>,
+    /// (durée de la recherche, délai frappe → résultats) en ms, pour les mesures.
+    pub(crate) search_latencies: RefCell<Vec<(f64, f64)>>,
+    /// Auto-test : début de l'attente de l'index.
+    search_wait: RefCell<Option<Instant>>,
     preview_visible: Cell<bool>,
     preview_seq: Cell<u64>,
     preview_host: RefCell<Option<ShellHost>>,
@@ -248,6 +266,15 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         suggest_seq: Cell::new(0),
         session_seq: Cell::new(0),
         palette: RefCell::default(),
+        index_dir: options.index_dir.clone(),
+        search: RefCell::new(None),
+        search_gen: Cell::new(0),
+        search_sent: Cell::new(None),
+        search_waiting: Cell::new(false),
+        search_rows: RefCell::default(),
+        search_index_status: RefCell::default(),
+        search_latencies: RefCell::default(),
+        search_wait: RefCell::default(),
         preview_visible: Cell::new(false),
         preview_seq: Cell::new(0),
         preview_host: RefCell::new(None),
@@ -395,6 +422,9 @@ fn wire_callbacks(ui: &MainWindow) {
     });
     ui.on_palette_edited(|q| with_app(|a| a.palette_filter(&q)));
     ui.on_palette_run(|i| with_app(|a| a.palette_run(i)));
+    ui.on_search_opened(|| with_app(|a| a.search_opened()));
+    ui.on_search_edited(|q| with_app(|a| a.search_edited(&q)));
+    ui.on_search_run(|i, open| with_app(|a| a.search_run(i, open)));
 }
 
 /// Cible de dépôt de la fenêtre : délègue au volet sous le pointeur (thread d'interface).
@@ -970,6 +1000,135 @@ impl App {
 
     // ------------------------------------------------------------------ commandes
 
+    // ------------------------------------------------------------------ recherche globale
+
+    /// Premier affichage de la recherche : démarre le moteur (cache de l'index, puis mise à
+    /// jour en arrière-plan). L'index n'occupe la mémoire qu'à partir de là.
+    fn search_opened(self: &Rc<Self>) {
+        if self.search.borrow().is_none() {
+            let Some(dir) = self.index_dir.clone() else {
+                self.ui
+                    .set_search_status("Dossier du cache d'index introuvable.".into());
+                return;
+            };
+            let volumes = fx_win::shell::fixed_ntfs_volumes();
+            self.ui.set_search_status("Chargement de l'index…".into());
+            let engine = fx_core::search_engine::Engine::start(dir, volumes, |ev| {
+                post(move |a| a.on_search_event(ev));
+            });
+            *self.search.borrow_mut() = Some(engine);
+        } else if let Some(e) = self.search.borrow().as_ref() {
+            e.warm();
+        }
+        let q = self.ui.get_search_query();
+        if !q.trim().is_empty() {
+            self.search_edited(&q);
+        } else {
+            self.ui
+                .set_search_status(self.search_index_status.borrow().clone().into());
+        }
+    }
+
+    fn search_edited(&self, text: &str) {
+        if text.trim().is_empty() {
+            self.search_gen.set(0);
+            self.search_rows.borrow_mut().clear();
+            self.ui.set_search_items(ModelRc::default());
+            self.ui
+                .set_search_status(self.search_index_status.borrow().clone().into());
+            return;
+        }
+        if let Some(e) = self.search.borrow().as_ref() {
+            self.search_gen.set(e.query(text));
+            self.search_sent.set(Some(Instant::now()));
+            self.search_waiting.set(true);
+        }
+    }
+
+    fn on_search_event(&self, ev: fx_core::search_engine::EngineEvent) {
+        use fx_core::search_engine::EngineEvent;
+        match ev {
+            EngineEvent::Status(s) => {
+                *self.search_index_status.borrow_mut() = s.clone();
+                if self.search_rows.borrow().is_empty() {
+                    self.ui.set_search_status(s.into());
+                }
+                // Index prêt ou mis à jour : la requête affichée est refaite (sauf si une
+                // requête est déjà en cours : elle verra l'index à jour).
+                let q = self.ui.get_search_query();
+                if self.ui.get_search_open() && !q.trim().is_empty() && !self.search_waiting.get() {
+                    self.search_edited(&q);
+                }
+            }
+            EngineEvent::Results {
+                generation,
+                total,
+                rows,
+                millis,
+            } => {
+                if generation != self.search_gen.get() {
+                    return;
+                }
+                self.search_waiting.set(false);
+                let latency = self.search_sent.get().map(|t| t.elapsed().as_secs_f64() * 1000.0);
+                if let Some(l) = latency {
+                    self.search_latencies.borrow_mut().push((millis, l));
+                }
+                let items: Vec<SearchItem> = rows
+                    .iter()
+                    .map(|r| SearchItem {
+                        name: r.name.clone().into(),
+                        folder: std::path::Path::new(&r.path)
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                            .into(),
+                        is_dir: r.is_dir,
+                        dimmed: r.hidden,
+                    })
+                    .collect();
+                let shown = items.len();
+                *self.search_rows.borrow_mut() = rows;
+                self.ui.set_search_items(ModelRc::new(VecModel::from(items)));
+                let count = fx_core::format::group_thousands(total as u64);
+                let more = if total > shown {
+                    format!(" (les {shown} premiers affichés)")
+                } else {
+                    String::new()
+                };
+                self.ui
+                    .set_search_status(format!("{count} résultat(s){more} · {millis:.0} ms").into());
+            }
+        }
+    }
+
+    fn search_run(self: &Rc<Self>, index: i32, open: bool) {
+        let Some(row) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.search_rows.borrow().get(i).cloned())
+        else {
+            return;
+        };
+        let path = PathBuf::from(&row.path);
+        let pane = self.active_pane();
+        pane.ui_focus_list();
+        if open && row.is_dir {
+            pane.navigate(path, true, Vec::new());
+        } else if open {
+            let owner = self.hwnd.get();
+            let id = pane.id;
+            self.host_post_raw(move |_| {
+                if let Err(e) = fx_win::shell::open(&path, owner) {
+                    let msg = format!("Impossible d'ouvrir « {} » : {}", path.display(), e.message());
+                    post_pane(id, move |p| p.flash_status(msg));
+                }
+            });
+        } else if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+            let name: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(name).collect();
+            pane.navigate(parent.to_path_buf(), true, vec![name]);
+        }
+    }
+
     fn palette_filter(&self, query: &str) {
         let q = query.trim().to_lowercase();
         let matches: Vec<Cmd> = COMMANDS
@@ -1027,6 +1186,7 @@ impl App {
             Cmd::FolderSize => self.folder_sizes(),
             Cmd::AddFavorite => self.add_favorite(),
             Cmd::RemoveFavorite => self.remove_favorite(),
+            Cmd::Search => self.ui.invoke_open_search(),
             Cmd::WinEOn => self.set_win_e(true),
             Cmd::WinEOff => self.set_win_e(false),
         }
@@ -1509,6 +1669,11 @@ impl App {
                             with_app(|a| a.start_scroll_bench())
                         });
                     }
+                    BenchMode::Search { .. } => {
+                        slint::Timer::single_shot(Duration::from_millis(300), || {
+                            with_app(|a| a.search_bench_step(0))
+                        });
+                    }
                     BenchMode::SelfTest { .. } => {
                         let start = b.start_path.clone();
                         slint::Timer::single_shot(Duration::from_millis(500), move || {
@@ -1902,9 +2067,218 @@ impl App {
             23 => {
                 self.on_key(-1, "v", true, true, false);
                 self.check(!p.model.is_grid(), "retour à la vue détails");
+                // Recherche globale : ouverture (moteur démarré, index chargé ou construit).
+                self.ui.invoke_open_search();
+                *self.search_wait.borrow_mut() = Some(Instant::now());
+                next(500, dir);
+            }
+            24 => {
+                // Attente de l'index (construction complète au premier lancement).
+                let status = self.search_index_status.borrow().clone();
+                let ready = status.contains("éléments") && !status.contains('…');
+                let waited = self
+                    .search_wait
+                    .borrow()
+                    .map_or(0.0, |t| t.elapsed().as_secs_f64());
+                if !ready && waited < 120.0 {
+                    slint::Timer::single_shot(Duration::from_millis(500), move || {
+                        with_app(|a| a.self_test_step(24, dir))
+                    });
+                    return;
+                }
+                self.check(ready, &format!("index de recherche prêt en {waited:.1} s"));
+                // Créé après le démarrage de la surveillance : indexé en direct.
+                let name = format!("fx-recherche-{}-zq.txt", std::process::id());
+                let _ = std::fs::write(dir.join(&name), b"x");
+                next(1500, dir);
+            }
+            25 => {
+                let name = format!("fx-recherche-{}-zq", std::process::id());
+                self.search_latencies.borrow_mut().clear();
+                // Frappe lettre par lettre : chaque frappe lance une recherche.
+                let mut typed = String::new();
+                for c in name.chars() {
+                    typed.push(c);
+                    self.ui.set_search_query(typed.as_str().into());
+                    self.search_edited(&typed);
+                }
+                next(1500, dir);
+            }
+            26 => {
+                let rows = self.search_rows.borrow().clone();
+                let expected = dir.join(format!("fx-recherche-{}-zq.txt", std::process::id()));
+                let ok = rows.len() == 1 && same_path(Path::new(&rows[0].path), &expected);
+                self.check(
+                    ok,
+                    &format!(
+                        "fichier créé trouvé par la recherche ({} résultat(s))",
+                        rows.len()
+                    ),
+                );
+                self.search_run(0, false);
+                self.ui.set_search_open(false);
+                next(1500, dir);
+            }
+            27 => {
+                let sel = self.selected_display_names();
+                let here = p.current_path().is_some_and(|c| same_path(&c, &dir));
+                self.check(
+                    here && sel.len() == 1 && sel[0].starts_with("fx-recherche-"),
+                    &format!(
+                        "Entrée : dossier du résultat affiché, élément sélectionné ({} sélectionné(s))",
+                        sel.len()
+                    ),
+                );
+                let _ = std::fs::remove_file(dir.join(format!("fx-recherche-{}-zq.txt", std::process::id())));
+                next(1500, dir);
+            }
+            28 => {
+                let q = format!("fx-recherche-{}-zq", std::process::id());
+                self.search_edited(&q);
+                next(1000, dir);
+            }
+            29 => {
+                let n = self.search_rows.borrow().len();
+                self.check(
+                    n == 0,
+                    &format!("fichier supprimé retiré de l'index ({n} résultat(s))"),
+                );
+                let lat = self.search_latencies.borrow().clone();
+                if !lat.is_empty() {
+                    let mut s: Vec<f64> = lat.iter().map(|l| l.0).collect();
+                    let mut e: Vec<f64> = lat.iter().map(|l| l.1).collect();
+                    s.sort_by(f64::total_cmp);
+                    e.sort_by(f64::total_cmp);
+                    let line = format!(
+                        "recherche : {} requêtes, durée médiane {:.1} ms (max {:.1}), frappe → résultats médiane {:.1} ms (max {:.1})\n",
+                        lat.len(),
+                        s[s.len() / 2],
+                        s[s.len() - 1],
+                        e[e.len() / 2],
+                        e[e.len() - 1]
+                    );
+                    if let Some(b) = self.bench.borrow_mut().as_mut() {
+                        b.report += &line;
+                    }
+                }
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
             _ => {}
+        }
+    }
+
+    fn bench_line(&self, line: String) {
+        tracing::info!("mesure : {line}");
+        if let Some(b) = self.bench.borrow_mut().as_mut() {
+            b.report += &line;
+            b.report += "\n";
+        }
+    }
+
+    fn memory_line(&self, what: &str) {
+        if let Some(m) = fx_win::process::memory() {
+            self.bench_line(format!(
+                "mémoire {what} : privée {:.1} Mo, working set {:.1} Mo",
+                m.private as f64 / 1_048_576.0,
+                m.working_set as f64 / 1_048_576.0
+            ));
+        }
+    }
+
+    /// Mesure de la recherche. Frappe : une touche toutes les 120 ms (frappe rapide) ; on
+    /// mesure le délai entre chaque frappe et l'affichage de ses résultats.
+    fn search_bench_step(self: &Rc<Self>, step: usize) {
+        const WORDS: [&str; 4] = ["windows", "system32", "rapport 2024", "zzqx"];
+        const PACE_MS: u64 = 120;
+        let again = move |delay: u64, s: usize| {
+            slint::Timer::single_shot(Duration::from_millis(delay), move || {
+                with_app(|a| a.search_bench_step(s))
+            });
+        };
+        match step {
+            0 => {
+                self.memory_line("au repos, avant la recherche");
+                *self.search_wait.borrow_mut() = Some(Instant::now());
+                self.ui.invoke_open_search();
+                again(200, 1);
+            }
+            1 => {
+                let status = self.search_index_status.borrow().clone();
+                let waited = self
+                    .search_wait
+                    .borrow()
+                    .map_or(0.0, |t| t.elapsed().as_secs_f64());
+                if !(status.contains("éléments") && !status.contains('…')) && waited < 300.0 {
+                    again(200, 1);
+                    return;
+                }
+                self.bench_line(format!("index prêt en {waited:.2} s ({status})"));
+                self.memory_line("index chargé");
+                self.search_latencies.borrow_mut().clear();
+                again(500, 100);
+            }
+            // 100 + n : n-ième frappe de la séquence complète.
+            s if (100..1000).contains(&s) => {
+                let n = s - 100;
+                let seq: Vec<String> = WORDS
+                    .iter()
+                    .flat_map(|w| (1..=w.chars().count()).map(move |k| w.chars().take(k).collect::<String>()))
+                    .collect();
+                if let Some(text) = seq.get(n) {
+                    self.ui.set_search_query(text.as_str().into());
+                    self.search_edited(text);
+                    again(PACE_MS, s + 1);
+                    return;
+                }
+                let lat = self.search_latencies.borrow().clone();
+                let mut d: Vec<f64> = lat.iter().map(|l| l.0).collect();
+                let mut e: Vec<f64> = lat.iter().map(|l| l.1).collect();
+                d.sort_by(f64::total_cmp);
+                e.sort_by(f64::total_cmp);
+                if let (Some(dm), Some(em)) = (d.last(), e.last()) {
+                    self.bench_line(format!(
+                        "frappes : {} sur {} affichées · recherche p50 {:.1} ms, max {:.1} ms · frappe → résultats p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms",
+                        lat.len(),
+                        seq.len(),
+                        d[d.len() / 2],
+                        dm,
+                        e[e.len() / 2],
+                        e[(e.len() * 95 / 100).min(e.len() - 1)],
+                        em
+                    ));
+                }
+                // Recherche fermée d'abord : sinon l'état « index libéré » relance la requête
+                // affichée, qui relit l'index.
+                self.ui.set_search_open(false);
+                if let Some(eng) = self.search.borrow().as_ref() {
+                    eng.release();
+                }
+                again(3000, 2);
+            }
+            2 => {
+                self.memory_line("index libéré");
+                self.search_latencies.borrow_mut().clear();
+                // Réouverture comme l'utilisateur (relecture anticipée), première frappe 150 ms
+                // plus tard.
+                self.ui.set_search_query("".into());
+                self.ui.invoke_open_search();
+                again(150, 4);
+            }
+            4 => {
+                self.ui.set_search_query("w".into());
+                self.search_edited("w");
+                again(3000, 3);
+            }
+            _ => {
+                if let Some((d, e)) = self.search_latencies.borrow().first() {
+                    self.bench_line(format!(
+                        "première frappe 150 ms après la réouverture (index libéré, relu à l'ouverture) : {e:.0} ms (recherche {d:.1} ms)"
+                    ));
+                }
+                self.memory_line("index relu");
+                self.ui.set_search_open(false);
+                slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
+            }
         }
     }
 
@@ -2016,6 +2390,7 @@ impl App {
             BenchMode::Startup { out }
             | BenchMode::Open { out, .. }
             | BenchMode::SelfTest { out }
+            | BenchMode::Search { out }
             | BenchMode::Scroll { out, .. } => out.clone(),
         };
         if let Some(p) = target

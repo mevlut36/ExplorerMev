@@ -83,9 +83,21 @@ pub fn build(letter: char, p: &WalkProgress) -> Result<VolumeIndex, String> {
         ..IndexMeta::default()
     };
     let (tx, rx) = sync_channel::<Batch>(1024);
+    // Pool dédié, en priorité « arrière-plan » (processeur et disque) et deux fois moins de
+    // threads que de cœurs : la reconstruction ne doit pas gêner l'utilisateur.
+    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("fx-index-{i}"))
+        .start_handler(|_| {
+            fx_win::process::background_thread();
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
     std::thread::scope(|s| {
         s.spawn(|| {
-            rayon::scope(|sc| walk(root.clone(), ROOT_REC, tx, p, sc));
+            fx_win::process::background_thread();
+            pool.scope(|sc| walk(root.clone(), ROOT_REC, tx, p, sc));
         });
         for b in rx {
             let mut at = 0usize;

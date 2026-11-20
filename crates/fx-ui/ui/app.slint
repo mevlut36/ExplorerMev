@@ -488,6 +488,14 @@ export struct TabItem {
     active: bool,
 }
 
+// Résultat de la recherche globale.
+export struct SearchItem {
+    name: string,
+    folder: string,
+    is-dir: bool,
+    dimmed: bool,
+}
+
 export struct PaletteItem {
     label: string,
     hint: string,
@@ -998,6 +1006,13 @@ export component MainWindow inherits Window {
     in property <[PaletteItem]> palette-items;
     in-out property <int> palette-index;
 
+    // --- Recherche globale (Ctrl+Maj+F) ---
+    in-out property <bool> search-open;
+    in-out property <string> search-query;
+    in property <[SearchItem]> search-items;
+    in-out property <int> search-index;
+    in property <string> search-status;
+
     // --- Actions vers Rust ---
     callback navigate-to(string);
     callback address-edited(string);
@@ -1029,6 +1044,10 @@ export component MainWindow inherits Window {
     callback key(pane: int, text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
     callback palette-edited(string);
     callback palette-run(int);
+    callback search-opened();
+    callback search-edited(string);
+    // open : ouvrir l'élément ; sinon, afficher son dossier en le sélectionnant.
+    callback search-run(index: int, open: bool);
 
     public function scroll-to-row(pane: int, row: int) {
         if pane == 1 { p1.scroll-to-row(row); } else { p0.scroll-to-row(row); }
@@ -1061,6 +1080,11 @@ export component MainWindow inherits Window {
         if pane == 1 { return p1.row-anchor-y(row); }
         return p0.row-anchor-y(row);
     }
+    public function open-search() {
+        root.search-open = true;
+        root.search-index = 0;
+        root.search-opened();
+    }
     public function open-palette() {
         root.palette-open = true;
         root.palette-query = "";
@@ -1078,6 +1102,10 @@ export component MainWindow inherits Window {
         key-pressed(event) => {
             if (event.modifiers.control && event.text == "l") || (event.modifiers.alt && event.text == "d") || event.text == Key.F4 {
                 root.start-address-edit();
+                return accept;
+            }
+            if event.modifiers.control && event.modifiers.shift && (event.text == "f" || event.text == "F") {
+                root.open-search();
                 return accept;
             }
             if event.modifiers.control && (event.text == "f" || event.text == "e") {
@@ -1402,6 +1430,135 @@ export component MainWindow inherits Window {
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
+                }
+            }
+        }
+    }
+
+    // Recherche sur tous les volumes (Ctrl+Maj+F).
+    if root.search-open: Rectangle {
+        background: #00000030;
+        TouchArea {
+            clicked => {
+                root.search-open = false;
+                root.focus-list(root.active-pane);
+            }
+        }
+        search-panel := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 60px;
+            width: min(760px, parent.width - 40px);
+            height: min(parent.height - 100px, 640px);
+            background: Theme.popup;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.divider;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000060;
+            function move(delta: int) {
+                root.search-index = max(0, min(root.search-items.length - 1, root.search-index + delta));
+                // Garder la ligne choisie visible (lignes de 44 px).
+                let top = root.search-index * 44px;
+                if top < -search-list.content-y {
+                    search-list.content-y = -top;
+                } else if top + 44px > -search-list.content-y + search-list.visible-height {
+                    search-list.content-y = -(top + 44px - search-list.visible-height);
+                }
+            }
+            // Clics dans le panneau : ne ferment pas la recherche.
+            TouchArea { }
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+                LineEdit {
+                    placeholder-text: "Rechercher sur l'ordinateur (noms de fichiers et de dossiers)";
+                    init => { self.focus(); }
+                    text <=> root.search-query;
+                    font-size: 13px;
+                    edited(t) => {
+                        root.search-index = 0;
+                        search-list.content-y = 0;
+                        root.search-edited(t);
+                    }
+                    accepted => {
+                        if root.search-items.length > 0 {
+                            root.search-open = false;
+                            root.search-run(root.search-index, false);
+                        }
+                    }
+                    key-pressed(e) => {
+                        if e.text == Key.Escape {
+                            root.search-open = false;
+                            root.focus-list(root.active-pane);
+                            return accept;
+                        }
+                        if e.text == Key.Return && e.modifiers.control && root.search-items.length > 0 {
+                            root.search-open = false;
+                            root.search-run(root.search-index, true);
+                            return accept;
+                        }
+                        if e.text == Key.DownArrow { search-panel.move(1); return accept; }
+                        if e.text == Key.UpArrow { search-panel.move(-1); return accept; }
+                        if e.text == Key.PageDown { search-panel.move(10); return accept; }
+                        if e.text == Key.PageUp { search-panel.move(-10); return accept; }
+                        reject
+                    }
+                }
+                Text {
+                    text: root.search-status;
+                    font-size: 11px;
+                    color: Theme.text-secondary;
+                    overflow: elide;
+                }
+                search-list := ListView {
+                    vertical-stretch: 1;
+                    for item[i] in root.search-items: Rectangle {
+                        height: 44px;
+                        border-radius: 4px;
+                        background: i == root.search-index ? Theme.selected : hit.has-hover ? Theme.hover : transparent;
+                        accessible-role: list-item;
+                        accessible-label: item.name;
+                        accessible-item-selected: i == root.search-index;
+                        hit := TouchArea {
+                            clicked => { root.search-index = i; }
+                            double-clicked => {
+                                root.search-open = false;
+                                root.search-run(i, false);
+                            }
+                        }
+                        Text {
+                            x: 10px;
+                            width: 24px;
+                            text: item.is-dir ? "\u{E8B7}" : "\u{E8A5}";
+                            font-family: Theme.icons;
+                            font-size: 16px;
+                            color: item.is-dir ? Theme.folder : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            x: 40px;
+                            y: 5px;
+                            width: parent.width - 50px;
+                            text: item.name;
+                            font-size: 12px;
+                            opacity: item.dimmed ? 0.6 : 1.0;
+                            overflow: elide;
+                        }
+                        Text {
+                            x: 40px;
+                            y: 23px;
+                            width: parent.width - 50px;
+                            text: item.folder;
+                            font-size: 11px;
+                            color: Theme.text-secondary;
+                            overflow: elide;
+                        }
+                    }
+                }
+                Text {
+                    text: "Entrée : afficher dans son dossier · Ctrl+Entrée : ouvrir · Échap : fermer";
+                    font-size: 11px;
+                    color: Theme.text-secondary;
                 }
             }
         }

@@ -26,6 +26,7 @@ Options :
   --bench-startup             mesure le démarrage, affiche les durées et quitte
   --bench-open <dossier>      mesure l'ouverture de <dossier> (cache chaud) et quitte
   --bench-scroll <dossier>    mesure le défilement dans <dossier> et quitte (--maximized : plein écran)
+  --bench-search              mesure la recherche globale (frappe simulée, mémoire) et quitte
   --icons                     ouvre les volets en vue icônes (réglage « view » de config.toml)
   --self-test <dossier vide>  scénario d'auto-test dans ce dossier (créé et modifié !), puis quitte
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
@@ -46,6 +47,7 @@ struct Args {
     bench_open: Option<PathBuf>,
     self_test: Option<PathBuf>,
     bench_scroll: Option<PathBuf>,
+    bench_search: bool,
     maximized: bool,
     icons: bool,
     iterations: usize,
@@ -65,6 +67,7 @@ fn parse_args() -> anyhow::Result<Args> {
         bench_open: None,
         self_test: None,
         bench_scroll: None,
+        bench_search: false,
         maximized: false,
         icons: false,
         iterations: 3,
@@ -97,6 +100,7 @@ fn parse_args() -> anyhow::Result<Args> {
             Some("--bench-open") => {
                 a.bench_open = Some(it.next().context("--bench-open attend un dossier")?.into())
             }
+            Some("--bench-search") => a.bench_search = true,
             Some("--bench-scroll") => {
                 a.bench_scroll = Some(it.next().context("--bench-scroll attend un dossier")?.into())
             }
@@ -232,7 +236,8 @@ fn main() -> ExitCode {
     let benching = args.bench_startup
         || args.bench_open.is_some()
         || args.self_test.is_some()
-        || args.bench_scroll.is_some();
+        || args.bench_scroll.is_some()
+        || args.bench_search;
     if args.help || benching || args.win_e.is_some() {
         // Sous-système GUI : on se rattache à la console du parent pour y écrire.
         fx_win::process::attach_parent_console();
@@ -288,6 +293,8 @@ fn main() -> ExitCode {
         })
     } else if args.self_test.is_some() {
         Some(BenchMode::SelfTest { out: args.out })
+    } else if args.bench_search {
+        Some(BenchMode::Search { out: args.out })
     } else if let Some(path) = args.bench_open {
         Some(BenchMode::Open {
             path,
@@ -318,6 +325,12 @@ fn main() -> ExitCode {
         // Sans dossier explicite, on reprend les onglets de la session précédente.
         restore_session: !benching && explicit_path.is_none(),
         data_dir: std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("WinDir")),
+        // Les modes de mesure ont leur propre cache (reproductibilité, pas de mélange).
+        index_dir: std::env::var_os("LOCALAPPDATA").map(|d| {
+            PathBuf::from(d)
+                .join("WinDir")
+                .join(if benching { "index-mesure" } else { "index" })
+        }),
         bench,
         main_start,
     };

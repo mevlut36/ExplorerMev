@@ -87,3 +87,13 @@ pub fn attach_parent_console() -> bool {
     // SAFETY: aucun pointeur ; échoue proprement s'il n'y a pas de console parente.
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok()
 }
+
+/// Passe le thread courant en mode arrière-plan (priorités processeur, disque et mémoire
+/// abaissées) : pour les travaux longs qui ne doivent pas gêner l'utilisateur.
+pub fn background_thread() -> bool {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+    };
+    // SAFETY: pseudo-handle du thread courant, toujours valide.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) }.is_ok()
+}

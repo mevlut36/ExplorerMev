@@ -42,6 +42,16 @@ pub mod flag {
     pub const DELETED: u16 = 0x8000;
 }
 
+/// Agrandit `v` pour `extra` éléments de plus, par pas d'1/16 (au moins 64 Kio) et non en
+/// doublant : sur un index de plus de 100 Mo, la première insertion après un chargement
+/// doublerait sinon la mémoire.
+fn grow<T>(v: &mut Vec<T>, extra: usize) {
+    if v.len() + extra > v.capacity() {
+        let step = (v.len() / 16).max(65_536 / size_of::<T>().max(1));
+        v.reserve_exact(extra.max(step));
+    }
+}
+
 /// Numéro d'enregistrement MFT d'une référence de fichier NTFS (`None` s'il ne tient pas).
 pub fn record_of(file_ref: u64) -> Option<u32> {
     let rec = file_ref & 0xFFFF_FFFF_FFFF;
@@ -170,7 +180,9 @@ impl VolumeIndex {
         if index == NONE {
             return;
         }
+        grow(&mut self.names, text.len());
         self.names.extend_from_slice(text.as_bytes());
+        grow(&mut self.items, 1);
         self.items.push(Item {
             rec,
             parent,
@@ -180,9 +192,16 @@ impl VolumeIndex {
         });
         let r = rec as usize;
         if r >= self.by_rec.len() {
+            let extra = r + 1 - self.by_rec.len();
+            grow(&mut self.by_rec, extra);
             self.by_rec.resize(r + 1, NONE);
         }
         self.by_rec[r] = index;
+    }
+
+    /// L'enregistrement `rec` est-il indexé ?
+    pub fn contains(&self, rec: u32) -> bool {
+        self.slot(rec).is_some()
     }
 
     /// Retire l'élément `rec` (supprimé du disque).

@@ -25,8 +25,15 @@ use fx_win::watcher::{DirChange, Watcher, watch_tree};
 use crate::search::{Query, ROOT_REC, VolumeIndex, record_of, search};
 use crate::search_walk::{WalkProgress, build, record_of_path};
 
-/// Un cache plus ancien est rafraîchi par une reconstruction en arrière-plan.
-const CACHE_MAX_AGE: Duration = Duration::from_secs(3600);
+/// Un cache plus ancien est rafraîchi par une reconstruction en arrière-plan (les
+/// changements faits pendant que l'application était fermée n'y sont pas).
+const CACHE_MAX_AGE: Duration = Duration::from_secs(600);
+/// Sans recherche pendant ce délai, les index sont libérés (relus depuis le cache à la
+/// recherche suivante) : la mémoire revient à son niveau de repos.
+pub const UNLOAD_AFTER: Duration = Duration::from_secs(300);
+/// Au-delà, les changements notés pendant que l'index est libéré sont abandonnés et l'index
+/// sera reconstruit.
+const MAX_PENDING: usize = 200_000;
 /// Résultats renvoyés à l'interface.
 pub const RESULT_LIMIT: usize = 1000;
 
@@ -57,6 +64,10 @@ enum Cmd {
         text: String,
         generation: u64,
     },
+    /// Libérer les index tout de suite (mesures).
+    Release,
+    /// La recherche vient d'être ouverte : relire les index libérés avant la première frappe.
+    Warm,
     Changes {
         vol: usize,
         changes: Vec<DirChange>,
@@ -112,6 +123,16 @@ impl Engine {
         }
     }
 
+    /// Prépare les index (ouverture de la recherche) : relit ceux qui ont été libérés.
+    pub fn warm(&self) {
+        let _ = self.tx.send(Cmd::Warm);
+    }
+
+    /// Libère les index immédiatement (comme après `UNLOAD_AFTER` sans recherche).
+    pub fn release(&self) {
+        let _ = self.tx.send(Cmd::Release);
+    }
+
     /// Lance une recherche ; renvoie sa génération (les résultats la portent).
     pub fn query(&self, text: &str) -> u64 {
         let generation = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
@@ -129,9 +150,15 @@ struct Vol {
     serial: u32,
     index: Option<VolumeIndex>,
     building: bool,
-    /// Changements reçus pendant une construction, rejoués ensuite.
+    /// Changements reçus pendant une construction ou pendant que l'index est libéré, rejoués
+    /// ensuite.
     pending: Vec<DirChange>,
+    /// Trop de changements notés : reconstruire au lieu de rejouer.
+    stale: bool,
+    /// Modifié depuis la dernière écriture du cache.
     dirty: bool,
+    /// Libéré de la mémoire (relu depuis le cache à la prochaine recherche).
+    unloaded: bool,
 }
 
 fn cache_path(dir: &Path, letter: char) -> PathBuf {
@@ -183,6 +210,7 @@ fn status(vols: &[Vol]) -> String {
                 crate::format::group_thousands(ix.len() as u64)
             ),
             (None, true) => format!("{}: indexation…", v.letter),
+            (None, false) if v.unloaded => format!("{}: en cache", v.letter),
             (None, false) => format!("{}: indisponible", v.letter),
         })
         .collect();
@@ -218,7 +246,9 @@ fn run(
             index: cached.map(|(ix, _)| ix),
             building: !fresh,
             pending: Vec::new(),
+            stale: false,
             dirty: false,
+            unloaded: false,
         });
     }
     on_event(EngineEvent::Status(status(&vols)));
@@ -232,12 +262,19 @@ fn run(
     spawn_builds(to_build, tx.clone());
 
     let mut next: Option<Cmd> = None;
+    let mut last_query = Instant::now();
     loop {
         let cmd = match next.take() {
             Some(c) => c,
-            None => match rx.recv() {
+            None => match rx.recv_timeout(Duration::from_secs(15)) {
                 Ok(c) => c,
-                Err(_) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if last_query.elapsed() >= UNLOAD_AFTER {
+                        unload(&mut vols, &cache_dir);
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             },
         };
         match cmd {
@@ -259,7 +296,23 @@ fn run(
                 if generation != latest.load(Ordering::SeqCst) {
                     continue;
                 }
+                last_query = Instant::now();
+                if vols.iter().any(|v| v.unloaded) {
+                    reload(&mut vols, &cache_dir, &tx);
+                    on_event(EngineEvent::Status(status(&vols)));
+                }
                 run_query(&vols, &text, generation, latest, on_event);
+            }
+            Cmd::Release => {
+                unload(&mut vols, &cache_dir);
+                on_event(EngineEvent::Status(status(&vols)));
+            }
+            Cmd::Warm => {
+                last_query = Instant::now();
+                if vols.iter().any(|v| v.unloaded) {
+                    reload(&mut vols, &cache_dir, &tx);
+                    on_event(EngineEvent::Status(status(&vols)));
+                }
             }
             other => {
                 handle(other, &mut vols, &cache_dir, &tx, on_event);
@@ -267,6 +320,58 @@ fn run(
                 if let Ok(c) = rx.try_recv() {
                     next = Some(c);
                 }
+            }
+        }
+    }
+}
+
+/// Libère les index inactifs (cache écrit d'abord s'ils ont changé).
+fn unload(vols: &mut [Vol], cache_dir: &Path) {
+    for v in vols.iter_mut() {
+        if v.building || v.unloaded {
+            continue;
+        }
+        let mem = || {
+            fx_win::process::memory()
+                .map(|m| m.private / 1_048_576)
+                .unwrap_or(0)
+        };
+        let m0 = mem();
+        let Some(mut ix) = v.index.take() else { continue };
+        if v.dirty {
+            save_cache(cache_dir, &mut ix);
+            v.dirty = false;
+        }
+        let m1 = mem();
+        drop(ix);
+        v.unloaded = true;
+        tracing::info!(volume = %v.letter, avant = m0, apres_cache = m1, apres = mem(), "index libéré (inactif)");
+    }
+}
+
+/// Relit les index libérés et rejoue les changements notés entre-temps.
+fn reload(vols: &mut [Vol], cache_dir: &Path, tx: &Sender<Cmd>) {
+    for (i, v) in vols.iter_mut().enumerate() {
+        if !v.unloaded {
+            continue;
+        }
+        v.unloaded = false;
+        match load_cache(cache_dir, v.letter, v.serial) {
+            Some((mut ix, _)) if !v.stale => {
+                let pending = std::mem::take(&mut v.pending);
+                v.dirty = !pending.is_empty();
+                let overflow = apply(&mut ix, &v.root, v.serial, pending);
+                v.index = Some(ix);
+                if overflow {
+                    v.building = true;
+                    spawn_builds(vec![(i, v.letter)], tx.clone());
+                }
+            }
+            _ => {
+                v.pending.clear();
+                v.stale = false;
+                v.building = true;
+                spawn_builds(vec![(i, v.letter)], tx.clone());
             }
         }
     }
@@ -341,10 +446,17 @@ fn spawn_builds(list: Vec<(usize, char)>, tx: Sender<Cmd>) {
 fn handle(cmd: Cmd, vols: &mut [Vol], cache_dir: &Path, tx: &Sender<Cmd>, on_event: &dyn Fn(EngineEvent)) {
     match cmd {
         Cmd::Query { .. } => {}
+        Cmd::Release => unload(vols, cache_dir),
+        Cmd::Warm => {}
         Cmd::Changes { vol, changes } => {
             let Some(v) = vols.get_mut(vol) else { return };
             if v.building || v.index.is_none() {
-                v.pending.extend(changes);
+                if v.pending.len() + changes.len() > MAX_PENDING {
+                    v.pending.clear();
+                    v.stale = true;
+                } else if !v.stale {
+                    v.pending.extend(changes);
+                }
                 return;
             }
             let overflow = match v.index.as_mut() {
@@ -366,6 +478,7 @@ fn handle(cmd: Cmd, vols: &mut [Vol], cache_dir: &Path, tx: &Sender<Cmd>, on_eve
                 Ok(mut ix) => {
                     tracing::info!(volume = %v.letter, elements = ix.len(), secs, "index construit");
                     let pending = std::mem::take(&mut v.pending);
+                    v.stale = false;
                     apply(&mut ix, &v.root, v.serial, pending);
                     save_cache(cache_dir, &mut ix);
                     v.index = Some(ix);
@@ -419,17 +532,36 @@ fn apply(ix: &mut VolumeIndex, root: &Path, serial: u32, changes: Vec<DirChange>
         let Some(entry) = stat_entry(parent, &name) else {
             continue;
         };
-        let (Some((r, s)), Some(p)) = (file_ref(&full), record_of_path(parent, serial)) else {
+        let Some((r, s)) = file_ref(&full) else {
             continue;
         };
         let Some(rec) = record_of(r).filter(|_| s == serial && r != 0) else {
             continue;
         };
-        let parent_rec = if parent.parent().is_none() { ROOT_REC } else { p };
+        let Some(parent_rec) = ensure_dir(ix, parent, serial) else {
+            continue;
+        };
         ix.upsert(rec, parent_rec, &entry.name, entry.attributes);
     }
     ix.maybe_compact();
     false
+}
+
+/// Enregistrement du dossier `dir`, en l'indexant avec ses ancêtres manquants (dossiers créés
+/// pendant que l'application était fermée, ou avant le démarrage de la surveillance).
+fn ensure_dir(ix: &mut VolumeIndex, dir: &Path, serial: u32) -> Option<u32> {
+    let Some(up) = dir.parent() else {
+        return Some(ROOT_REC);
+    };
+    let rec = record_of_path(dir, serial)?;
+    if ix.contains(rec) {
+        return Some(rec);
+    }
+    let parent = ensure_dir(ix, up, serial)?;
+    let name: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(dir.file_name()?).collect();
+    let entry = stat_entry(up, &name)?;
+    ix.upsert(rec, parent, &entry.name, entry.attributes);
+    Some(rec)
 }
 
 #[cfg(test)]
@@ -486,8 +618,10 @@ mod tests {
         let tmp = tempfile::tempdir()?;
         let dir = std::fs::canonicalize(tmp.path())?;
         let dir = PathBuf::from(dir.to_string_lossy().trim_start_matches(r"\\?\"));
-        let (mut ix, root, serial) = chain_index(&dir)?;
-
+        // Le dossier temporaire lui-même n'est pas indexé (comme un dossier créé pendant que
+        // l'application était fermée) : il est ajouté avec son premier contenu.
+        let (_, root, serial) = chain_index(&dir)?;
+        let (mut ix, _, _) = chain_index(dir.parent().ok_or("parent")?)?;
         let sub = dir.join("Projet Zéphyr");
         std::fs::create_dir(&sub)?;
         let file = sub.join("notes-zephyrine.txt");
