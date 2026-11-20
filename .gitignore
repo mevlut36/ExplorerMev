@@ -1,2 +1,4 @@
 target/
 *.log
+# Livrables de distribution (packaging/package.ps1)
+/dist/

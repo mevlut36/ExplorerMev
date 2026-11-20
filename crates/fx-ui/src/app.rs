@@ -1282,6 +1282,13 @@ impl App {
     /// Option « Remplacer Win+E » (désactivée par défaut). L'activation est confirmée ; la
     /// désactivation ne retire que la clé posée par WinDir.
     fn set_win_e(self: &Rc<Self>, on: bool) {
+        if fx_win::process::is_packaged() {
+            self.active_pane().flash_status(
+                "Win+E ne peut pas être remplacé depuis le paquet MSIX (registre isolé) : utilisez la version portable."
+                    .into(),
+            );
+            return;
+        }
         let owner = self.hwnd.get().unwrap_or(0);
         let id = self.active_pane().id;
         let exe = std::env::current_exe();

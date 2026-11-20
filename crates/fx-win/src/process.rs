@@ -97,3 +97,24 @@ pub fn background_thread() -> bool {
     // SAFETY: pseudo-handle du thread courant, toujours valide.
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) }.is_ok()
 }
+
+/// Le processus tourne-t-il dans un paquet MSIX ? Dans ce cas les écritures sous `HKCU` et dans
+/// `%APPDATA%` / `%LOCALAPPDATA%` sont redirigées vers un emplacement privé du paquet : visibles
+/// de l'application seule (ce qui convient aux réglages, pas à « Remplacer Win+E »).
+pub fn is_packaged() -> bool {
+    use windows::Win32::Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_INSUFFICIENT_BUFFER};
+    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+    let mut len = 0u32;
+    // SAFETY: longueur locale ; aucun tampon (la fonction renvoie alors la taille nécessaire,
+    // ERROR_INSUFFICIENT_BUFFER, si le processus a une identité de paquet).
+    let r = unsafe { GetCurrentPackageFullName(&mut len, None) };
+    r != APPMODEL_ERROR_NO_PACKAGE && (r == ERROR_INSUFFICIENT_BUFFER || r.0 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_binary_is_not_packaged() {
+        assert!(!super::is_packaged());
+    }
+}

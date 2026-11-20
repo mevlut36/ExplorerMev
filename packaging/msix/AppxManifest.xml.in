@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Modèle du manifeste MSIX. Les jetons {{…}} sont remplacés par packaging/package.ps1
+  (version de Cargo.toml, sujet du certificat de signature).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap5 rescap">
+
+  <Identity Name="WinDir" Publisher="{{PUBLISHER}}" Version="{{VERSION}}" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>WinDir</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY}}</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Explorateur de fichiers rapide et léger pour Windows 11.</Description>
+  </Properties>
+
+  <Dependencies>
+    <!-- Windows 11 (Mica, Segoe UI Variable) -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="fr-FR" />
+    <Resource Language="en-US" />
+  </Resources>
+
+  <Applications>
+    <Application Id="WinDir" Executable="windir.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="WinDir"
+        Description="Explorateur de fichiers rapide et léger pour Windows 11."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- `windir` depuis un terminal -->
+        <uap5:Extension Category="windows.appExecutionAlias" Executable="windir.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap5:AppExecutionAlias>
+            <uap5:ExecutionAlias Alias="windir.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Application Win32 : accès complet aux fichiers de l'utilisateur, comme l'Explorateur -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

@@ -33,6 +33,7 @@ Options :
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
   --out <fichier>             écrit aussi le rapport de mesure dans <fichier>
   --win-e <on|off|status>     Win+E ouvre WinDir (on) ou l'Explorateur (off), puis quitte
+  -V, --version               affiche la version
   -h, --help                  affiche cette aide
 
 Configuration : %APPDATA%\\WinDir\\config.toml (les options ci-dessus sont prioritaires)
@@ -54,6 +55,7 @@ struct Args {
     iterations: usize,
     out: Option<PathBuf>,
     help: bool,
+    version: bool,
     win_e: Option<String>,
 }
 
@@ -74,6 +76,7 @@ fn parse_args() -> anyhow::Result<Args> {
         iterations: 3,
         out: None,
         help: false,
+        version: false,
         win_e: None,
     };
     let mut it = std::env::args_os().skip(1);
@@ -119,6 +122,7 @@ fn parse_args() -> anyhow::Result<Args> {
             }
             Some("--out") => a.out = Some(it.next().context("--out attend un fichier")?.into()),
             Some("-h" | "--help" | "/?") => a.help = true,
+            Some("-V" | "--version") => a.version = true,
             Some("--win-e") => {
                 let v = it.next().context("--win-e attend on, off ou status")?;
                 match v.to_str() {
@@ -137,6 +141,12 @@ fn parse_args() -> anyhow::Result<Args> {
 /// désinstallation, scripts).
 fn win_e(action: &str) -> ExitCode {
     use fx_win::win_e::{WinEKey, WinEState};
+    if fx_win::process::is_packaged() {
+        eprintln!(
+            "Win+E ne peut pas être remplacé depuis le paquet MSIX (le registre y est isolé) :              utilisez la version portable."
+        );
+        return ExitCode::FAILURE;
+    }
     let key = WinEKey::default();
     let result: anyhow::Result<String> = (|| {
         Ok(match action {
@@ -244,12 +254,16 @@ fn main() -> ExitCode {
         || args.self_test.is_some()
         || args.bench_scroll.is_some()
         || args.bench_search;
-    if args.help || benching || args.win_e.is_some() {
+    if args.help || args.version || benching || args.win_e.is_some() {
         // Sous-système GUI : on se rattache à la console du parent pour y écrire.
         fx_win::process::attach_parent_console();
     }
     if args.help {
         println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    if args.version {
+        println!("WinDir {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
     }
     if let Some(action) = &args.win_e {
