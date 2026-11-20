@@ -12,6 +12,20 @@ plus léger que l'Explorateur Windows.
 > recherche par nom sur tous les volumes NTFS (Ctrl+Maj+F), sans droits ou, sur demande, par
 > la MFT. Paquet MSIX signé (certificat auto-signé), archive portable, manifestes winget.
 
+## Aperçu
+
+![Page d'accueil : accès rapide, éléments épinglés et fichiers récents](docs/images/Main.png)
+
+*Page d'accueil : accès rapide, éléments épinglés et fichiers récents.*
+
+![Menu Apparence : mode clair, sombre ou système, couleurs d'accent et fond teinté](docs/images/Images.png)
+
+*Menu Apparence : mode, huit couleurs d'accent et fond teinté.*
+
+![Vue icônes avec vignettes et volet d'aperçu](docs/images/Preview.png)
+
+*Vue icônes avec vignettes et volet d'aperçu (Alt+P).*
+
 ## Installation
 
 ExplorerMev n'a pas encore de version publiée : les livrables se produisent avec
