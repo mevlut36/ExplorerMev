@@ -22,4 +22,7 @@ pub fn apply_style(hwnd: isize, theme: Option<Theme>, mica: bool) {
     if let Err(e) = fx_win::dwm::set_window_style(hwnd, dark, backdrop) {
         tracing::warn!("style de fenêtre DWM non appliqué : {e}");
     }
+    if let Err(e) = fx_win::dwm::set_window_icon(hwnd) {
+        tracing::warn!("icône de fenêtre non appliquée : {e}");
+    }
 }
