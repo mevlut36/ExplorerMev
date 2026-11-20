@@ -19,6 +19,7 @@ mod generated {
 pub use generated::*;
 
 mod app;
+mod appearance;
 mod bench;
 mod icons;
 mod model;
@@ -57,6 +58,8 @@ pub struct Options {
     pub index_dir: Option<PathBuf>,
     /// Indexer par la MFT (assistant élevé) dès le démarrage de la recherche.
     pub index_mft: bool,
+    /// Apparence imposée pour cette session, non mémorisée (`--theme mode=clair,accent=rose`).
+    pub theme_override: Option<String>,
     pub bench: Option<BenchMode>,
     /// Instant de début de `main`, pour l'instrumentation du démarrage.
     pub main_start: Instant,

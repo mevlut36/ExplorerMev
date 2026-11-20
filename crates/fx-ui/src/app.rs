@@ -134,6 +134,7 @@ enum Cmd {
     Search,
     IndexMft,
     NewFile,
+    Appearance,
 }
 
 const COMMANDS: &[(Cmd, &str, &str)] = &[
@@ -159,6 +160,7 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::Refresh, "Actualiser", "F5 / Ctrl+R"),
     (Cmd::NewFolder, "Nouveau dossier", "Ctrl+Maj+N"),
     (Cmd::NewFile, "Nouveau fichier", ""),
+    (Cmd::Appearance, "Apparence : mode clair ou sombre, couleurs…", ""),
     (Cmd::SelectAll, "Tout sélectionner", "Ctrl+A"),
     (Cmd::Rename, "Renommer", "F2"),
     (Cmd::Delete, "Supprimer (corbeille)", "Suppr"),
@@ -206,6 +208,10 @@ pub(crate) struct App {
     palette: RefCell<Vec<Cmd>>,
     index_dir: Option<PathBuf>,
     index_mft: bool,
+    /// Apparence choisie (mode, accent, teinte) et thème de Windows.
+    appearance: Cell<crate::appearance::Appearance>,
+    theme_forced: bool,
+    system_dark: Cell<bool>,
     /// Moteur de recherche, démarré à la première ouverture de la recherche.
     search: RefCell<Option<fx_core::search_engine::Engine>>,
     search_gen: Cell<u64>,
@@ -283,6 +289,15 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         palette: RefCell::default(),
         index_dir: options.index_dir.clone(),
         index_mft: options.index_mft,
+        appearance: Cell::new(match &options.theme_override {
+            Some(t) => crate::appearance::Appearance::parse(&t.replace(
+                ',', "
+",
+            )),
+            None => crate::appearance::load(options.data_dir.as_deref()),
+        }),
+        theme_forced: options.theme_override.is_some() || options.bench.is_some(),
+        system_dark: Cell::new(fx_win::dwm::system_prefers_dark()),
         search: RefCell::new(None),
         search_gen: Cell::new(0),
         search_sent: Cell::new(None),
@@ -323,9 +338,9 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
             }
             match ev {
                 WindowEvent::ThemeChanged(theme) => with_app(|a| {
-                    if let Some(h) = a.hwnd.get() {
-                        crate::window::apply_style(h, Some(*theme), a.mica);
-                    }
+                    a.system_dark
+                        .set(*theme == slint::winit_030::winit::window::Theme::Dark);
+                    a.apply_appearance();
                 }),
                 WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                     let px = (16.0 * scale_factor).round() as u32;
@@ -359,6 +374,8 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
     if !restored {
         app.open_tab(options.start.clone(), None, false, true);
     }
+    // Couleurs avant la première image (thème de Windows lu dans le registre).
+    app.apply_appearance();
     ui.show()?;
     app.active_pane().ui_focus_list();
     if let Some(w) = options.startup_warning.clone() {
@@ -454,6 +471,19 @@ fn wire_callbacks(ui: &MainWindow) {
     ui.on_palette_edited(|q| with_app(|a| a.palette_filter(&q)));
     ui.on_palette_run(|i| with_app(|a| a.palette_run(i)));
     ui.on_command(|id| with_app(|a| a.toolbar_command(id)));
+    ui.on_appearance_changed(|mode, accent, tint| {
+        with_app(|a| {
+            a.appearance.set(crate::appearance::Appearance {
+                mode,
+                accent,
+                tinted: tint,
+            });
+            if !a.theme_forced {
+                crate::appearance::save(a.data_dir.as_deref(), &a.appearance.get());
+            }
+            a.apply_appearance();
+        })
+    });
     ui.on_search_opened(|| with_app(|a| a.search_opened()));
     ui.on_search_edited(|q| with_app(|a| a.search_edited(&q)));
     ui.on_search_run(|i, open| with_app(|a| a.search_run(i, open)));
@@ -504,7 +534,11 @@ impl App {
         self.update_window_width();
         self.set_icon_px((16.0 * w.scale_factor()).round() as u32);
         let Some(h) = self.hwnd.get() else { return };
-        crate::window::apply_style(h, theme, self.mica);
+        if let Some(t) = theme {
+            self.system_dark
+                .set(t == slint::winit_030::winit::window::Theme::Dark);
+        }
+        self.apply_appearance();
         match fx_win::dragdrop::register(h, Box::new(UiDrop)) {
             Ok(reg) => *self.drop_reg.borrow_mut() = Some(reg),
             Err(e) => tracing::warn!("cible de glisser-déposer non enregistrée : {e}"),
@@ -766,13 +800,7 @@ impl App {
                 let p = &t.panes[if t.dual.get() { t.focus.get() } else { 0 }];
                 let title = p
                     .current_path()
-                    .map(|path| {
-                        let shown = fx_win::path::display_form(&path);
-                        shown
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| shown.display().to_string())
-                    })
+                    .map(|path| crate::nav::title_of(&path))
                     .unwrap_or_default();
                 TabItem {
                     title: title.into(),
@@ -1256,6 +1284,7 @@ impl App {
             Cmd::Refresh => pane.refresh(),
             Cmd::NewFolder => pane.new_folder(),
             Cmd::NewFile => pane.new_file(),
+            Cmd::Appearance => self.ui.invoke_show_appearance(),
             Cmd::SelectAll => {
                 pane.model.update_selection(|s, v| s.select_all(v));
                 pane.update_status();
@@ -1530,6 +1559,21 @@ impl App {
 
     /// Met à jour le volet d'aperçu pour la sélection du volet actif, après un court délai
     /// (le défilement au clavier ne déclenche pas un aperçu par ligne).
+    /// Applique l'apparence choisie : interface (Slint) et fenêtre native (barre de titre, Mica).
+    fn apply_appearance(&self) {
+        use slint::winit_030::winit::window::Theme;
+        let a = self.appearance.get();
+        let dark = a.effective_dark(self.system_dark.get());
+        self.ui.set_mode_index(a.mode);
+        self.ui.set_accent_index(a.accent);
+        self.ui.set_tinted(a.tinted);
+        self.ui.set_dark_mode(dark);
+        self.ui.invoke_apply_appearance();
+        if let Some(h) = self.hwnd.get() {
+            crate::window::apply_style(h, Some(if dark { Theme::Dark } else { Theme::Light }), self.mica);
+        }
+    }
+
     /// Largeur logique de la fenêtre (libellés de la barre d'outils).
     fn update_window_width(&self) {
         let w = self.ui.window();
@@ -2441,6 +2485,30 @@ impl App {
                 self.check(
                     at_root,
                     "WSL : « dossier parent » d'une distribution = racine Linux",
+                );
+                // Apparence : clair + rose + fond teinté, comme un clic dans le menu.
+                self.ui.invoke_appearance_changed(1, 1, true);
+                next(400, dir);
+            }
+            36 => {
+                self.check(
+                    !self.ui.get_dark_mode() && self.ui.get_tinted() && self.ui.get_accent_index() == 1,
+                    "apparence : clair, accent rose, fond teinté appliqués",
+                );
+                // Retour au sombre vert, puis menu Apparence ouvert pour la capture.
+                self.ui.invoke_appearance_changed(2, 2, false);
+                self.check(
+                    self.ui.get_dark_mode() && !self.ui.get_tinted(),
+                    "apparence : sombre appliqué",
+                );
+                self.ui.invoke_show_appearance();
+                let _ = std::fs::write(dir.join("capture-apparence-menu.flag"), b"");
+                next(1500, dir);
+            }
+            37 => {
+                self.check(
+                    self.theme_forced,
+                    "apparence : l'auto-test ne modifie pas les réglages de l'utilisateur",
                 );
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }

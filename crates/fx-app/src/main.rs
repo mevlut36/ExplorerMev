@@ -28,6 +28,7 @@ Options :
   --bench-open <dossier>      mesure l'ouverture de <dossier> (cache chaud) et quitte
   --bench-scroll <dossier>    mesure le défilement dans <dossier> et quitte (--maximized : plein écran)
   --bench-search              mesure la recherche globale (frappe simulée, mémoire) et quitte
+  --theme <réglages>          apparence pour cette session seulement (ex. mode=clair,accent=rose,teinte=1)
   --icons                     ouvre les volets en vue icônes (réglage « view » de config.toml)
   --self-test <dossier vide>  scénario d'auto-test dans ce dossier (créé et modifié !), puis quitte
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
@@ -54,6 +55,7 @@ struct Args {
     bench_search: bool,
     maximized: bool,
     icons: bool,
+    theme: Option<String>,
     iterations: usize,
     out: Option<PathBuf>,
     help: bool,
@@ -76,6 +78,7 @@ fn parse_args() -> anyhow::Result<Args> {
         bench_search: false,
         maximized: false,
         icons: false,
+        theme: None,
         iterations: 3,
         out: None,
         help: false,
@@ -114,6 +117,14 @@ fn parse_args() -> anyhow::Result<Args> {
             }
             Some("--maximized") => a.maximized = true,
             Some("--icons") => a.icons = true,
+            Some("--theme") => {
+                a.theme = Some(
+                    it.next()
+                        .context("--theme attend des réglages")?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
             Some("--self-test") => {
                 a.self_test = Some(it.next().context("--self-test attend un dossier")?.into())
             }
@@ -407,6 +418,7 @@ fn main() -> ExitCode {
         show_hidden: args.show_hidden.unwrap_or(cfg.show_hidden),
         icons_view: args.icons || cfg.icons_view,
         index_mft: cfg.index_mft,
+        theme_override: args.theme.clone(),
         network_timeout: args
             .network_timeout
             .map(std::time::Duration::from_secs)

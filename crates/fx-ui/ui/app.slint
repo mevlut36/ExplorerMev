@@ -41,12 +41,20 @@ export struct Crumb {
 }
 
 export global Theme {
-    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
-    out property <brush> layer: dark ? #3a3a3a4c : #ffffff80;
+    // Définis par apply-appearance() de la fenêtre (mode clair/sombre effectif, accent, teinte).
+    in-out property <bool> dark: true;
+    in-out property <color> accent: #0078d4;
+    in-out property <bool> tinted: false;
+    // Couleurs d'accent proposées (même ordre que les noms, et que dans la mémorisation).
+    out property <[color]> accents: [#0078d4, #e8508f, #2e9f5b, #8764b8, #e87722, #d13438, #00a2ad, #6e7b8b];
+    out property <[string]> accent-names: ["Bleu", "Rose", "Vert", "Violet", "Orange", "Rouge", "Turquoise", "Gris"];
+    out property <brush> layer: dark ? (tinted ? accent.with-alpha(0.20) : #3a3a3a4c) : (tinted ? #ffffffa8 : #ffffff80);
+    // Teinte de toute la fenêtre (derrière le contenu).
+    out property <brush> window-tint: tinted ? accent.with-alpha(dark ? 0.16 : 0.20) : transparent;
     out property <brush> hover: dark ? #ffffff0f : #0000000a;
     out property <brush> pressed: dark ? #ffffff0a : #00000006;
-    out property <brush> selected: dark ? #ffffff15 : #0000000f;
-    out property <brush> selected-hover: dark ? #ffffff1f : #00000017;
+    out property <brush> selected: accent.with-alpha(dark ? 0.30 : 0.18);
+    out property <brush> selected-hover: accent.with-alpha(dark ? 0.38 : 0.26);
     out property <brush> divider: dark ? #ffffff15 : #0000000f;
     out property <brush> text-secondary: dark ? #ffffffc5 : #000000a0;
     out property <brush> text-disabled: dark ? #ffffff5d : #0000005c;
@@ -122,6 +130,56 @@ component CmdButton inherits Rectangle {
             color: root.enabled ? Palette.foreground : Theme.text-disabled;
             vertical-alignment: center;
         }
+    }
+}
+
+// Pastille de couleur d'accent.
+component Swatch inherits Rectangle {
+    in property <color> swatch;
+    in property <bool> selected;
+    in property <string> label;
+    callback clicked;
+    width: 30px;
+    height: 30px;
+    border-radius: 15px;
+    background: swatch;
+    border-width: selected ? 2px : 0px;
+    border-color: Palette.foreground;
+    accessible-role: button;
+    accessible-label: label;
+    swa := TouchArea { clicked => { root.clicked(); } }
+    if root.selected: Text {
+        text: "\u{E73E}";
+        font-family: Theme.icons;
+        font-size: 14px;
+        color: white;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        background: swa.has-hover ? #ffffff22 : transparent;
+        border-radius: 15px;
+    }
+}
+
+// Choix segmenté (mode d'apparence).
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked;
+    height: 30px;
+    border-radius: 4px;
+    background: selected ? Theme.selected : chp.has-hover ? Theme.hover : transparent;
+    border-width: 1px;
+    border-color: selected ? Theme.accent : Theme.divider;
+    accessible-role: button;
+    accessible-label: text;
+    chp := TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.text;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
 }
 
@@ -247,7 +305,7 @@ component FileRow inherits Rectangle {
         y: 1px;
         height: parent.height - 2px;
         border-radius: 4px;
-        background: root.drop-target ? Palette.accent-background.transparentize(0.6)
+        background: root.drop-target ? Theme.accent.transparentize(0.6)
             : root.data.selected ? (ta.has-hover ? Theme.selected-hover : Theme.selected)
             : ta.has-hover ? Theme.hover : transparent;
         border-width: root.data.focused && root.list-has-focus ? 1px : 0px;
@@ -259,9 +317,9 @@ component FileRow inherits Rectangle {
         y: 1px;
         height: parent.height - 2px;
         border-radius: 4px;
-        background: Palette.accent-background;
+        background: Theme.accent;
         border-width: 1px;
-        border-color: Palette.accent-background;
+        border-color: Theme.accent;
         opacity: root.flash ? 0.28 : 0.0;
         animate opacity { duration: 600ms; easing: ease-in-out; }
     }
@@ -270,7 +328,7 @@ component FileRow inherits Rectangle {
         width: 3px;
         height: 16px;
         border-radius: 1.5px;
-        background: Palette.accent-background;
+        background: Theme.accent;
     }
     Rectangle {
         opacity: root.data.dimmed ? 0.55 : 1.0;
@@ -419,7 +477,7 @@ component Tile inherits Rectangle {
         width: parent.width - 6px;
         height: parent.height - 6px;
         border-radius: 4px;
-        background: root.drop-target ? Palette.accent-background.transparentize(0.6)
+        background: root.drop-target ? Theme.accent.transparentize(0.6)
             : root.data.selected ? (ta.has-hover ? Theme.selected-hover : Theme.selected)
             : ta.has-hover ? Theme.hover : transparent;
         border-width: root.data.focused && root.list-has-focus ? 1px : 0px;
@@ -431,7 +489,7 @@ component Tile inherits Rectangle {
         width: parent.width - 6px;
         height: parent.height - 6px;
         border-radius: 4px;
-        background: Palette.accent-background;
+        background: Theme.accent;
         opacity: root.flash ? 0.28 : 0.0;
         animate opacity { duration: 600ms; easing: ease-in-out; }
     }
@@ -541,7 +599,7 @@ component NavPane inherits Rectangle {
                     width: 3px;
                     height: 16px;
                     border-radius: 1.5px;
-                    background: Palette.accent-background;
+                    background: Theme.accent;
                 }
                 if !item.header: Text {
                     x: 12px;
@@ -732,7 +790,7 @@ component FolderPane inherits Rectangle {
         height: 2px;
         x: 8px;
         width: parent.width - 16px;
-        background: Palette.accent-background;
+        background: Theme.accent;
         border-radius: 1px;
     }
 
@@ -912,9 +970,9 @@ component FolderPane inherits Rectangle {
                     y: min(root.mq-y0, root.mq-y1) + root.content-y;
                     width: abs(root.mq-x1 - root.mq-x0);
                     height: abs(root.mq-y1 - root.mq-y0);
-                    background: Palette.accent-background.transparentize(0.75);
+                    background: Theme.accent.transparentize(0.75);
                     border-width: 1px;
-                    border-color: Palette.accent-background;
+                    border-color: Theme.accent;
                 }
                 if root.error-text != "": Rectangle {
                     Text {
@@ -1092,6 +1150,28 @@ export component MainWindow inherits Window {
     out property <length> preview-width: preview-area.width;
     out property <length> preview-height: preview-area.height;
 
+    // --- Apparence ---
+    // Mode : 0 système, 1 clair, 2 sombre. `dark-mode` : mode clair/sombre effectif, calculé par
+    // Rust (il dépend du thème de Windows).
+    in-out property <int> mode-index: 0;
+    in-out property <int> accent-index: 0;
+    in-out property <bool> tinted: false;
+    in property <bool> dark-mode: true;
+    // mode, accent, teinte : choisis dans le menu Apparence (mémorisés par Rust).
+    callback appearance-changed(mode: int, accent: int, tint: bool);
+
+    // Applique l'apparence aux éléments de l'interface et au style des widgets standard.
+    public function apply-appearance() {
+        Theme.dark = root.dark-mode;
+        Theme.accent = Theme.accents[max(0, min(root.accent-index, Theme.accents.length - 1))];
+        Theme.tinted = root.tinted;
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    public function show-appearance() {
+        appearance-popup.show();
+    }
+
     // --- Barre d'outils ---
     // Largeur de la fenêtre en pixels logiques, fournie par Rust (lire `root.width` ici créerait une
     // boucle : la largeur de la fenêtre découle de la mise en page).
@@ -1199,6 +1279,73 @@ export component MainWindow inherits Window {
         root.address-editing = true;
         address-edit.focus();
         address-edit.select-all();
+    }
+
+    // Teinte de la fenêtre (option « fond teinté »), derrière tout le contenu.
+    Rectangle {
+        background: Theme.window-tint;
+    }
+
+    // Menu Apparence.
+    appearance-popup := PopupWindow {
+        x: max(8px, appearance-button.absolute-position.x - root.absolute-position.x + appearance-button.width - 300px);
+        y: appearance-button.absolute-position.y - root.absolute-position.y + appearance-button.height + 4px;
+        width: 300px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Theme.popup;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Theme.divider;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000060;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+                Text { text: "Apparence"; font-size: 14px; font-weight: 600; }
+                Text { text: "Mode"; font-size: 11px; color: Theme.text-secondary; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Chip {
+                        text: "Système";
+                        selected: root.mode-index == 0;
+                        clicked => { root.mode-index = 0; root.appearance-changed(0, root.accent-index, root.tinted); }
+                    }
+                    Chip {
+                        text: "Clair";
+                        selected: root.mode-index == 1;
+                        clicked => { root.mode-index = 1; root.appearance-changed(1, root.accent-index, root.tinted); }
+                    }
+                    Chip {
+                        text: "Sombre";
+                        selected: root.mode-index == 2;
+                        clicked => { root.mode-index = 2; root.appearance-changed(2, root.accent-index, root.tinted); }
+                    }
+                }
+                Text { text: "Couleur"; font-size: 11px; color: Theme.text-secondary; }
+                for row in [0, 1]: HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    for k in [0, 1, 2, 3]: Swatch {
+                        swatch: Theme.accents[row * 4 + k];
+                        label: Theme.accent-names[row * 4 + k];
+                        selected: root.accent-index == row * 4 + k;
+                        clicked => {
+                            root.accent-index = row * 4 + k;
+                            root.appearance-changed(root.mode-index, row * 4 + k, root.tinted);
+                        }
+                    }
+                }
+                Chip {
+                    text: root.tinted ? "Fond teinté : activé" : "Fond teinté : désactivé";
+                    selected: root.tinted;
+                    clicked => {
+                        root.tinted = !root.tinted;
+                        root.appearance-changed(root.mode-index, root.accent-index, root.tinted);
+                    }
+                }
+            }
+        }
     }
 
     global-keys := FocusScope {
@@ -1397,7 +1544,7 @@ export component MainWindow inherits Window {
                 padding-bottom: 4px;
                 spacing: 2px;
                 height: 36px;
-                alignment: start;
+                alignment: stretch;
                 CmdButton {
                     glyph: "\u{E8F4}";
                     text: "Nouveau dossier";
@@ -1464,6 +1611,14 @@ export component MainWindow inherits Window {
                     enabled: root.has-selection;
                     show-label: root.window-width > 1300px;
                     clicked => { root.command(7); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                appearance-button := CmdButton {
+                    glyph: "\u{E790}";
+                    text: "Apparence";
+                    tooltip: "Apparence : mode clair ou sombre, couleurs";
+                    show-label: root.window-width > 1000px;
+                    clicked => { appearance-popup.show(); }
                 }
             }
 

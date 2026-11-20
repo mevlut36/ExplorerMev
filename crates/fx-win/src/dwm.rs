@@ -46,6 +46,30 @@ pub fn set_window_style(hwnd: isize, dark: bool, backdrop: Backdrop) -> windows:
     Ok(())
 }
 
+/// Les applications de l'utilisateur sont-elles en thème sombre (réglage Windows) ? Sert à
+/// choisir les couleurs dès la première image, avant que winit ne rapporte le thème.
+pub fn system_prefers_dark() -> bool {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    use windows::core::{PCWSTR, w};
+    let mut value = 1u32;
+    let mut size = size_of::<u32>() as u32;
+    // SAFETY: chaînes littérales terminées par un nul ; sortie : un DWORD local de taille transmise.
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    let _ = PCWSTR::null();
+    // Valeur absente (ancien Windows) : sombre, comme avant.
+    r.0 != 0 || value == 0
+}
+
 /// Applique à la fenêtre l'icône de l'exécutable (ressource numéro 1, voir `app.rc`), en
 /// petite taille (barre de titre) et en grande taille (Alt+Tab). winit ne le fait pas : sans
 /// cela la barre de titre garde l'icône générique.

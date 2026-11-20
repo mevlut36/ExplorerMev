@@ -112,6 +112,28 @@ pub fn build(ready: impl FnOnce(Vec<NavEntry>) + Send + 'static) {
     }
 }
 
+/// Titre court d'un dossier (fenêtre, onglet) : son nom, « Linux » pour la racine WSL, le nom de
+/// la distribution pour sa racine, le chemin entier pour une racine de lecteur.
+pub fn title_of(path: &Path) -> String {
+    if fx_core::wsl::is_root(path) {
+        return "Linux".into();
+    }
+    let shown = fx_win::path::display_form(path);
+    if fx_core::wsl::parent_of_distro_root(&shown).is_some() {
+        return shown
+            .to_string_lossy()
+            .trim_end_matches('\\')
+            .rsplit('\\')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+    }
+    shown
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| shown.display().to_string())
+}
+
 /// Segments du fil d'Ariane : (libellé, chemin). La racine prend le nom du lecteur s'il est
 /// connu (« Disque local (C:) »).
 pub fn crumbs(path: &Path, drive_labels: &HashMap<PathBuf, String>) -> Vec<(String, PathBuf)> {
@@ -206,6 +228,15 @@ mod tests {
         let names: Vec<&str> = c.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(names, ["Disque local (C:)", "Users", "moi"]);
         assert_eq!(c[1].1, PathBuf::from(r"C:\Users"));
+    }
+
+    #[test]
+    fn titles() {
+        assert_eq!(title_of(Path::new(r"C:\Users\moi")), "moi");
+        assert_eq!(title_of(Path::new(r"C:\")), r"C:\");
+        assert_eq!(title_of(Path::new(r"\\wsl.localhost")), "Linux");
+        assert_eq!(title_of(Path::new(r"\\wsl.localhost\Ubuntu")), "Ubuntu");
+        assert_eq!(title_of(Path::new(r"\\wsl.localhost\Ubuntu\home")), "home");
     }
 
     #[test]

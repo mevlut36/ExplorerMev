@@ -412,10 +412,7 @@ impl Pane {
                 })
                 .collect();
         let shown = fx_win::path::display_form(&path);
-        let title = shown
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| shown.display().to_string());
+        let title = crate::nav::title_of(&path);
         self.ui_global(|ui| {
             ui.set_address(shown.display().to_string().into());
             ui.set_folder_title(title.into());
