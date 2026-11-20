@@ -19,6 +19,7 @@ mod generated {
 pub use generated::*;
 
 mod app;
+mod bench;
 mod icons;
 mod model;
 mod nav;
@@ -38,6 +39,12 @@ pub struct Options {
     /// Moteur de rendu Slint : `software` (défaut) ou `femtovg`.
     pub renderer: String,
     pub mica: bool,
+    /// Afficher les éléments cachés (réglage « Éléments masqués » de l'Explorateur).
+    pub show_hidden: bool,
+    /// Délai au-delà duquel un dossier qui ne répond pas (réseau) est abandonné.
+    pub network_timeout: std::time::Duration,
+    /// Avertissement à afficher au démarrage (configuration illisible…).
+    pub startup_warning: Option<String>,
     pub bench: Option<BenchMode>,
     /// Instant de début de `main`, pour l'instrumentation du démarrage.
     pub main_start: Instant,

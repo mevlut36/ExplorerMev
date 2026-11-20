@@ -1388,6 +1388,8 @@ dependencies = [
  "embed-resource",
  "fx-ui",
  "fx-win",
+ "tempfile",
+ "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

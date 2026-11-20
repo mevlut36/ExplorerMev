@@ -49,6 +49,8 @@ pub enum BenchMode {
     },
     /// Scénario d'auto-test dans un dossier jetable (sans entrée synthétique), puis quitte.
     SelfTest { out: Option<PathBuf> },
+    /// Défilement automatisé du dossier de départ (molette, rapide, sauts), puis quitte.
+    Scroll { maximized: bool, out: Option<PathBuf> },
 }
 
 thread_local! {
@@ -143,6 +145,8 @@ pub(crate) struct App {
     st: RefCell<State>,
     hwnd: Cell<Option<isize>>,
     mica: bool,
+    show_hidden: Cell<bool>,
+    network_timeout: Duration,
     nav_entries: RefCell<Vec<NavEntry>>,
     drive_labels: RefCell<HashMap<PathBuf, String>>,
     suggest_seq: Cell<u64>,
@@ -155,6 +159,8 @@ pub(crate) struct App {
     frames: Cell<u64>,
     main_start: Instant,
     bench: RefCell<Option<BenchState>>,
+    scroll: RefCell<Option<crate::bench::ScrollRun>>,
+    latency: Option<Arc<crate::bench::LatencyProbe>>,
 }
 
 pub(crate) fn run(options: Options) -> Result<(), UiError> {
@@ -196,6 +202,8 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         st: RefCell::default(),
         hwnd: Cell::new(None),
         mica: options.mica,
+        show_hidden: Cell::new(options.show_hidden),
+        network_timeout: options.network_timeout,
         nav_entries: RefCell::default(),
         drive_labels: RefCell::default(),
         suggest_seq: Cell::new(0),
@@ -208,16 +216,22 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         frames: Cell::new(0),
         main_start: options.main_start,
         bench: RefCell::new(bench),
+        scroll: RefCell::new(None),
+        latency: options.bench.is_some().then(crate::bench::LatencyProbe::start),
     });
     APP.with_borrow_mut(|a| *a = Some(app.clone()));
 
     wire_callbacks(&ui);
     {
         let mut ready = false;
+        let maximize = matches!(options.bench, Some(BenchMode::Scroll { maximized: true, .. }));
         ui.window().on_winit_window_event(move |w, ev| {
             if !ready {
                 // Premier événement : la fenêtre native existe.
                 ready = true;
+                if maximize {
+                    w.with_winit_window(|ww| ww.set_maximized(true));
+                }
                 let theme = w.with_winit_window(|ww| ww.theme()).flatten();
                 with_app(|a| a.on_native_window(w, theme));
             }
@@ -243,6 +257,9 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
     app.navigate(options.start.clone(), true, Vec::new());
     ui.show()?;
     ui.invoke_focus_list();
+    if let Some(w) = options.startup_warning.clone() {
+        app.flash_status(w);
+    }
     slint::run_event_loop()?;
     app.drop_reg.borrow_mut().take();
     APP.with_borrow_mut(|a| *a = None);
@@ -341,21 +358,15 @@ impl App {
             self.history.borrow_mut().navigate(path.clone());
         }
         self.ui.set_rename_row(-1);
-        // La surveillance démarre avant le listing : aucun changement n'est perdu (les
-        // événements arrivés pendant le listing sont appliqués ensuite).
-        let watcher = self.loader.watch(
-            &path,
-            Box::new(move |events| post(move |a| a.on_fs_events(generation, events))),
-        );
         let spec = {
             let mut st = self.st.borrow_mut();
             st.complete = false;
             st.pending_since = (!select.is_empty()).then(Instant::now);
             st.pending_select = select;
             st.pending_rename = false;
-            st.filter = Filter::default();
+            st.filter = Filter::default().with_hidden(self.show_hidden.get());
             st.load_spec = st.spec;
-            st.watcher = watcher;
+            st.watcher = None;
             st.applying = false;
             st.queued.clear();
             st.rename_entry = None;
@@ -374,7 +385,67 @@ impl App {
         self.timing.set(NavTiming::default());
         tracing::debug!(path = %path.display(), generation, "navigation");
         let sink: Sink = Arc::new(|ev| post(move |a| a.on_load_event(ev)));
-        self.loader.load(path, generation, spec, sink);
+        // La surveillance démarre sur le thread de listing, avant le listing : aucun
+        // changement n'est perdu, et l'ouverture d'un dossier réseau ne bloque jamais l'interface.
+        let watch: fx_core::source::WatchSink =
+            Box::new(move |events| post(move |a| a.on_fs_events(generation, events)));
+        self.loader.load(path, generation, spec, sink, Some(watch));
+        // Dossier qui ne répond pas (partage réseau injoignable) : abandon après le délai.
+        let timeout = self.network_timeout;
+        slint::Timer::single_shot(timeout, move || {
+            with_app(|a| {
+                let waiting = a.generation.get() == generation
+                    && a.timing.get().first_rows.is_none()
+                    && !a.st.borrow().complete;
+                if waiting {
+                    a.cancel_loading(format!(
+                        "Cet emplacement ne répond pas (aucune réponse après {} s). Appuyez sur F5 pour réessayer.",
+                        timeout.as_secs()
+                    ));
+                }
+            })
+        });
+    }
+
+    /// Abandonne le chargement en cours (Échap, délai dépassé), y compris une E/S bloquée.
+    fn cancel_loading(self: &Rc<Self>, message: String) {
+        if self.st.borrow().complete {
+            return;
+        }
+        self.loader.cancel();
+        // Les résultats éventuels de ce chargement seront ignorés.
+        self.generation.set(self.generation.get() + 1);
+        {
+            let mut st = self.st.borrow_mut();
+            st.complete = true;
+            st.folder = None;
+            st.watcher = None;
+            st.queued.clear();
+        }
+        tracing::info!("chargement abandonné : {message}");
+        self.model.clear();
+        self.ui.set_loading(false);
+        self.ui.set_error_text(message.into());
+        self.ui.set_status(SharedString::new());
+    }
+
+    fn toggle_hidden(self: &Rc<Self>) {
+        let show = !self.show_hidden.get();
+        self.show_hidden.set(show);
+        {
+            let mut st = self.st.borrow_mut();
+            st.filter = st.filter.clone().with_hidden(show);
+            st.view_version += 1;
+        }
+        self.recompute_view(false);
+        self.flash_status(
+            if show {
+                "Éléments masqués affichés"
+            } else {
+                "Éléments masqués cachés"
+            }
+            .into(),
+        );
     }
 
     fn update_nav_ui(&self, path: &Path) {
@@ -510,9 +581,18 @@ impl App {
                 if generation != self.generation.get() || self.st.borrow().complete {
                     return;
                 }
-                self.st.borrow_mut().folder = Some(folder.clone());
+                let filter = {
+                    let mut st = self.st.borrow_mut();
+                    st.folder = Some(folder.clone());
+                    st.filter.clone()
+                };
                 let len = folder.len();
-                self.model.set_view(Some(folder), order, Selection::new(len));
+                let visible = if filter.is_identity() {
+                    order
+                } else {
+                    filter.apply(&folder, &order)
+                };
+                self.model.set_view(Some(folder), visible, Selection::new(len));
                 self.mark_rows(false);
                 self.update_status();
             }
@@ -522,6 +602,7 @@ impl App {
                 keys,
                 order,
                 stats,
+                watcher,
             } => {
                 if generation != self.generation.get() {
                     return;
@@ -531,10 +612,11 @@ impl App {
                     st.folder = Some(folder.clone());
                     st.keys = Some(keys);
                     st.complete = true;
+                    st.watcher = watcher;
                     st.order = Arc::new(order.clone());
                     (st.filter.clone(), st.spec != st.load_spec)
                 };
-                let visible = if filter.is_empty() {
+                let visible = if filter.is_identity() {
                     order
                 } else {
                     filter.apply(&folder, &order)
@@ -551,7 +633,7 @@ impl App {
                 self.timing.set(t);
                 self.mark_rows(true);
                 self.after_pending(pending);
-                if needs_resort || !filter.is_empty() {
+                if needs_resort {
                     self.recompute_view(needs_resort);
                 }
                 self.update_status();
@@ -779,7 +861,7 @@ impl App {
     fn filter_edited(self: &Rc<Self>, text: &str) {
         {
             let mut st = self.st.borrow_mut();
-            st.filter = Filter::new(text);
+            st.filter = Filter::new(text).with_hidden(self.show_hidden.get());
             st.view_version += 1;
         }
         self.recompute_view(false);
@@ -985,7 +1067,9 @@ impl App {
             }
             return true;
         }
-        if is(Key::F5) {
+        if is(Key::Escape) && !self.st.borrow().complete {
+            self.cancel_loading("Chargement annulé. Appuyez sur F5 pour réessayer.".into());
+        } else if is(Key::F5) {
             self.refresh();
         } else if is(Key::F2) {
             self.begin_rename();
@@ -1014,6 +1098,7 @@ impl App {
                 'x' => self.clipboard_set(true),
                 'v' => self.paste(),
                 'n' if shift => self.new_folder(),
+                'h' => self.toggle_hidden(),
                 ' ' => {
                     self.model.update_selection(|s, _| s.toggle_focus());
                     self.update_status();
@@ -1342,10 +1427,13 @@ impl App {
         let (complete, filtered, total) = {
             let st = self.st.borrow();
             let Some(folder) = &st.folder else { return };
-            (st.complete, !st.filter.is_empty(), folder.len())
+            (st.complete, st.filter.has_query(), folder.len())
         };
         let shown = self.model.len();
-        let mut s = if filtered && complete {
+        let total = if complete { total.max(shown) } else { total };
+        let mut s = if !filtered && complete {
+            item_count(shown)
+        } else if filtered && complete {
             format!("{} sur {}", group_thousands(shown as u64), item_count(total))
         } else {
             item_count(total)
@@ -1414,6 +1502,9 @@ impl App {
 
     fn on_redraw(self: &Rc<Self>) {
         self.frames.set(self.frames.get() + 1);
+        if let Some(run) = self.scroll.borrow_mut().as_mut() {
+            run.frames.push(Instant::now());
+        }
         if self.frames.get() == 1 {
             let at = fx_win::process::ms_since_process_start();
             slint::Timer::single_shot(Duration::ZERO, move || {
@@ -1470,6 +1561,11 @@ impl App {
                 b.initial_painted_ms = fx_win::process::ms_since_process_start();
                 match &b.mode {
                     BenchMode::Startup { .. } => finish = true,
+                    BenchMode::Scroll { .. } => {
+                        slint::Timer::single_shot(Duration::from_millis(700), || {
+                            with_app(|a| a.start_scroll_bench());
+                        });
+                    }
                     BenchMode::SelfTest { .. } => {
                         let start = b.start_path.clone();
                         slint::Timer::single_shot(Duration::from_millis(500), move || {
@@ -1655,16 +1751,110 @@ impl App {
                     sel.len() == 1,
                     &format!("sélection reportée après suppression ({sel:?})"),
                 );
+                // Fichier caché créé par un autre programme : masqué par défaut.
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    let _ = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .attributes(0x2) // FILE_ATTRIBUTE_HIDDEN
+                        .open(dir.join("caché.ini"));
+                }
+                next(900, dir);
+            }
+            7 => {
+                self.check(
+                    self.model.len() == 3,
+                    &format!("fichier caché masqué ({} éléments affichés)", self.model.len()),
+                );
+                self.on_key("h", true, false, false);
+                next(400, dir);
+            }
+            8 => {
+                self.check(
+                    self.model.len() == 4,
+                    &format!("Ctrl+H affiche le fichier caché ({} éléments)", self.model.len()),
+                );
+                // Partage réseau injoignable : abandon après le délai, sans bloquer l'interface.
+                self.navigate(PathBuf::from(r"\\10.255.255.6\partage"), true, Vec::new());
+                let wait = self.network_timeout + Duration::from_millis(800);
+                slint::Timer::single_shot(wait, move || with_app(|a| a.self_test_step(9, dir)));
+            }
+            9 => {
+                let err = self.ui.get_error_text().to_string();
+                self.check(
+                    err.contains("ne répond pas") || err.contains("injoignable"),
+                    &format!("partage injoignable signalé ({err:?})"),
+                );
+                self.check(
+                    !self.ui.get_loading(),
+                    "chargement terminé (plus de « Chargement… »)",
+                );
+                self.go_back();
+                next(900, dir);
+            }
+            10 => {
+                self.check(
+                    self.model.len() == 4
+                        && self.current_path().as_deref().is_some_and(|p| same_path(p, &dir)),
+                    &format!(
+                        "retour arrière vers le dossier de test ({} éléments)",
+                        self.model.len()
+                    ),
+                );
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
             _ => {}
         }
     }
 
+    fn start_scroll_bench(self: &Rc<Self>) {
+        let driver = slint::Timer::default();
+        driver.start(slint::TimerMode::Repeated, Duration::from_millis(2), || {
+            with_app(|a| {
+                let max = a.ui.get_max_scroll() as f64;
+                let pos = a.scroll.borrow_mut().as_mut().and_then(|r| r.position(max));
+                match pos {
+                    Some(y) => a.ui.invoke_set_scroll(y as f32),
+                    None => {
+                        let report = a
+                            .scroll
+                            .borrow_mut()
+                            .take()
+                            .map(|r| r.report())
+                            .unwrap_or_default();
+                        let size = a.ui.window().size();
+                        if let Some(b) = a.bench.borrow_mut().as_mut() {
+                            b.report += &format!(
+                                "défilement de {} éléments, fenêtre {}x{} px, échelle {} :\n{report}",
+                                a.model.len(),
+                                size.width,
+                                size.height,
+                                a.ui.window().scale_factor()
+                            );
+                        }
+                        a.bench_report();
+                    }
+                }
+            })
+        });
+        *self.scroll.borrow_mut() = Some(crate::bench::ScrollRun {
+            started: Instant::now(),
+            phases: Vec::new(),
+            frames: Vec::new(),
+            rng: 0x2545_F491_4F6C_DD1D,
+            _driver: driver,
+        });
+    }
+
     fn bench_report(&self) {
-        let Some(b) = self.bench.borrow_mut().take() else {
+        let Some(mut b) = self.bench.borrow_mut().take() else {
             return;
         };
+        if let Some(l) = &self.latency {
+            l.stop();
+            b.report += &l.report();
+        }
         let ms = |d: Option<Duration>| {
             d.map(|d| format!("{:.1}", d.as_secs_f64() * 1000.0))
                 .unwrap_or("?".into())
@@ -1695,8 +1885,13 @@ impl App {
                 );
             }
         } else if let Some(m) = fx_win::process::memory() {
+            let when = if matches!(b.mode, BenchMode::Startup { .. }) {
+                "au repos"
+            } else {
+                "en fin de mesure"
+            };
             out += &format!(
-                "mémoire au repos : privée {:.1} Mo, working set {:.1} Mo\n",
+                "mémoire {when} : privée {:.1} Mo, working set {:.1} Mo\n",
                 m.private as f64 / 1_048_576.0,
                 m.working_set as f64 / 1_048_576.0
             );
@@ -1704,9 +1899,10 @@ impl App {
         out += &b.report;
         print!("{out}");
         let target = match &b.mode {
-            BenchMode::Startup { out } | BenchMode::Open { out, .. } | BenchMode::SelfTest { out } => {
-                out.clone()
-            }
+            BenchMode::Startup { out }
+            | BenchMode::Open { out, .. }
+            | BenchMode::SelfTest { out }
+            | BenchMode::Scroll { out, .. } => out.clone(),
         };
         if let Some(p) = target
             && let Err(e) = std::fs::write(&p, &out)

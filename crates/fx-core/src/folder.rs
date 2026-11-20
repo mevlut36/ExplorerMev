@@ -15,6 +15,24 @@ pub const ATTR_UNPINNED: u32 = 0x10_0000;
 pub const ATTR_RECALL_ON_OPEN: u32 = 0x4_0000;
 pub const ATTR_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
 
+/// `IO_REPARSE_TAG_CLOUD*` : 0x9000001A, avec un sous-type dans les bits 12 à 15.
+const IO_REPARSE_TAG_CLOUD: u32 = 0x9000_001A;
+const IO_REPARSE_TAG_CLOUD_MASK: u32 = 0x0000_F000;
+
+/// État d'un élément de fournisseur cloud (OneDrive…), comme la colonne « État » de
+/// l'Explorateur.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudState {
+    /// Élément ordinaire, hors fournisseur cloud.
+    None,
+    /// Disponible en ligne seulement : les données ne sont pas sur le disque.
+    OnlineOnly,
+    /// Disponible localement (peut être libéré par Windows).
+    Local,
+    /// « Toujours conserver sur cet appareil ».
+    Pinned,
+}
+
 /// Entrée brute produite par une source de listing. Le nom est emprunté.
 #[derive(Clone, Copy, Debug)]
 pub struct RawEntry<'a> {
@@ -48,6 +66,21 @@ impl Entry {
     pub fn is_hidden(&self) -> bool {
         self.attributes & ATTR_HIDDEN != 0
     }
+    /// État cloud, déduit des attributs et du tag de point d'analyse, sans accès au fichier.
+    pub fn cloud_state(&self) -> CloudState {
+        let tagged = self.reparse_tag & !IO_REPARSE_TAG_CLOUD_MASK == IO_REPARSE_TAG_CLOUD;
+        let cloud_attrs = ATTR_PINNED | ATTR_UNPINNED | ATTR_RECALL_ON_DATA_ACCESS | ATTR_RECALL_ON_OPEN;
+        if !tagged && self.attributes & cloud_attrs == 0 {
+            CloudState::None
+        } else if self.attributes & ATTR_PINNED != 0 {
+            CloudState::Pinned
+        } else if self.is_cloud_online_only() {
+            CloudState::OnlineOnly
+        } else {
+            CloudState::Local
+        }
+    }
+
     /// Fichier cloud dont les données ne sont pas présentes localement : il ne faut ni lire son
     /// contenu, ni extraire son icône ou sa miniature.
     pub fn is_cloud_online_only(&self) -> bool {
@@ -310,6 +343,31 @@ mod tests {
         assert_eq!(
             g.entry(1).map(|e| g.type_label(e).to_string()).as_deref(),
             Some("Texte")
+        );
+    }
+
+    #[test]
+    fn cloud_state_from_attributes_and_tag() {
+        let mut f = Folder::new(PathBuf::new());
+        let n = w("x");
+        let mut r = raw(&n, 0);
+        f.push(&r, 0); // ordinaire
+        r.attributes = ATTR_RECALL_ON_DATA_ACCESS | ATTR_OFFLINE;
+        r.reparse_tag = 0x9000_701A;
+        f.push(&r, 0);
+        r.attributes = 0;
+        f.push(&r, 0); // tag cloud, données présentes
+        r.attributes = ATTR_PINNED;
+        f.push(&r, 0);
+        let states: Vec<CloudState> = f.entries().iter().map(Entry::cloud_state).collect();
+        assert_eq!(
+            states,
+            [
+                CloudState::None,
+                CloudState::OnlineOnly,
+                CloudState::Local,
+                CloudState::Pinned
+            ]
         );
     }
 

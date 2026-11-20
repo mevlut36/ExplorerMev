@@ -186,3 +186,37 @@ reproduire.
 - Les icônes de la liste d'images système (`IImageList::GetIcon`) sont en alpha droit ; les
   bitmaps de `IShellItemImageFactory::GetImage` sont prémultipliés. `fx_win::icons` convertit
   les deux vers de l'alpha droit pour Slint.
+
+---
+
+## Phase 3
+
+### Partage réseau injoignable : 42 s de blocage, annulable
+
+- **Constat** : `CreateFileW` sur `\10.255.255.1\partage` (adresse sans réponse) bloque environ
+  **42 s** avant `ERROR_BAD_NETPATH`. `CancelSynchronousIo` sur le thread bloqué le libère
+  aussitôt avec `ERROR_OPERATION_ABORTED` (300 ms dans le test, le temps d'appeler l'annulation).
+- **Cache négatif du redirecteur SMB** : après un échec, un nouvel accès au même serveur échoue
+  instantanément pendant un certain temps. Pour mesurer le blocage, il faut une adresse jamais
+  essayée.
+- **Adresse de documentation** : `192.0.2.1` échoue instantanément (aucune route) ; elle ne
+  convient pas pour tester un blocage.
+- **Reproduction** : `cargo test -p fx-win --test listing unreachable -- --nocapture --include-ignored`.
+- **Conséquence** : le chargeur garde le `JoinHandle` du thread de listing et appelle
+  `CancelSynchronousIo` à l'annulation (Échap, changement de dossier, délai dépassé).
+
+### La surveillance ouvrait le dossier sur le thread d'interface
+
+- Défaut de la phase 2 : `watch()` (donc `CreateFileW` sur le dossier) était appelé depuis
+  `navigate()`, sur le thread d'interface. Sur un partage injoignable, l'interface aurait gelé
+  42 s. La surveillance démarre maintenant sur le thread de listing et arrive avec l'événement
+  `Complete`.
+
+### Pièges d'outillage (environnement de développement)
+
+- L'outil shell utilisé pour piloter le développement (bash MSYS) réduit `\` en `\` dans les
+  arguments et dans certains heredocs : un chemin UNC y devient `\serveur\…`, interprété comme
+  `C:\serveur\…`. Les chemins UNC de test sont donc écrits avec l'éditeur, et les essais passent
+  par PowerShell.
+- PowerShell : `… | Select-Object -First 1` interrompt le processus et laisse `$LASTEXITCODE` à
+  255 ; ce n'est pas le code de sortie de l'application.

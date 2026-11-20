@@ -17,7 +17,7 @@ use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_BAD_NET_NAME, ERROR_BAD_NETPATH, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
     ERROR_INVALID_FUNCTION, ERROR_INVALID_LEVEL, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER,
     ERROR_NETNAME_DELETED, ERROR_NETWORK_UNREACHABLE, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED,
-    ERROR_PATH_NOT_FOUND, ERROR_SEM_TIMEOUT, WIN32_ERROR,
+    ERROR_OPERATION_ABORTED, ERROR_PATH_NOT_FOUND, ERROR_SEM_TIMEOUT, WIN32_ERROR,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
@@ -110,6 +110,9 @@ impl From<windows::core::Error> for ListError {
     fn from(e: windows::core::Error) -> Self {
         if is(&e, ERROR_ACCESS_DENIED) {
             Self::AccessDenied
+        } else if is(&e, ERROR_OPERATION_ABORTED) {
+            // E/S synchrone annulée (CancelSynchronousIo) : chargement abandonné.
+            Self::Cancelled
         } else if is(&e, ERROR_FILE_NOT_FOUND) || is(&e, ERROR_PATH_NOT_FOUND) || is(&e, ERROR_INVALID_NAME) {
             Self::NotFound
         } else if is(&e, ERROR_DIRECTORY) {

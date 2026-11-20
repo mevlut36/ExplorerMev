@@ -123,6 +123,11 @@ impl DirSource for WinSource {
         fx_win::shell::type_name(file_name, is_dir)
     }
 
+    fn cancel_blocking(&self, thread: &std::thread::JoinHandle<()>) {
+        use std::os::windows::io::AsRawHandle;
+        fx_win::process::cancel_synchronous_io(thread.as_raw_handle() as isize);
+    }
+
     fn watch(&self, path: &Path, mut sink: WatchSink) -> Option<Box<dyn Send>> {
         let dir = path.to_path_buf();
         match fx_win::watcher::watch(path, move |changes| {

@@ -3,9 +3,11 @@
 Explorateur de fichiers pour Windows 11, écrit en Rust, conçu pour être nettement plus rapide et
 plus léger que l'Explorateur Windows.
 
-> **État : phase 2 terminée (utilisable au quotidien).** Navigation, volet et fil d'Ariane,
-> icônes, sélection multiple, renommage, corbeille, presse-papiers, menu contextuel natif,
-> glisser-déposer, rafraîchissement automatique. Réseau, OneDrive et configuration : phase 3.
+> **État : phase 3 terminée (robustesse).** Navigation, volet et fil d'Ariane, icônes,
+> sélection multiple, renommage, corbeille, presse-papiers, menu contextuel natif,
+> glisser-déposer, rafraîchissement automatique ; partages réseau avec délai et annulation,
+> état OneDrive, éléments masqués, configuration. Toutes les cibles de performance mesurées
+> (hors recherche, phase 5).
 
 ## Compilation et lancement
 
@@ -40,18 +42,32 @@ target\release\windir.exe --help
 | Maj+F10, touche Menu, clic droit | Menu contextuel de Windows |
 | Ctrl+L, Alt+D, F4 | Barre d'adresse (Tab complète, flèches parcourent les suggestions) |
 | Ctrl+F, Ctrl+E | Filtre du dossier courant (Échap pour l'effacer) |
+| Ctrl+H | Afficher ou masquer les éléments cachés |
+| Échap (pendant un chargement) | Abandonner le chargement (partage réseau qui ne répond pas) |
 | Clic sur un en-tête | Tri (un second clic inverse le sens) |
 
-## Mesures (machine de développement, cache chaud)
+## Configuration
+
+`%APPDATA%\WinDir\config.toml`, créé avec ses commentaires au premier lancement : moteur de
+rendu, Mica, dossier de départ, éléments masqués, délai réseau (10 s par défaut), niveau du
+journal. Une valeur invalide est ignorée avec un avertissement ; un fichier illisible n'est
+jamais écrasé. Les options de la ligne de commande sont prioritaires (`windir --help`).
+
+La colonne « État » montre l'état OneDrive : nuage (en ligne seulement), coche (disponible
+localement), coche pleine (toujours conservé).
+
+## Mesures (machine de développement)
 
 | Cible | Résultat |
 |---|---|
-| Démarrage < 250 ms | 81–92 ms jusqu'à la première image |
-| Mémoire au repos < 60 Mo | 15,9 Mo privés (dossier de 1 000 éléments) |
+| Démarrage < 250 ms | 63–121 ms (à froid approché : 70–77 ms) |
+| Mémoire au repos < 60 Mo | 15,8 Mo privés (dossier de 1 000 éléments) |
 | 100 000 fichiers, premier affichage < 150 ms | 9–16 ms |
-| 100 000 fichiers, liste triée < 1 s | 48–59 ms |
+| 100 000 fichiers, liste triée < 1 s | 59–67 ms |
+| Défilement à 60 i/s, 100 000 éléments | 0 image > 16,7 ms (fenêtre et plein écran) |
+| Thread d'interface jamais bloqué | latence max 18 ms, 0 mesure > 50 ms |
 
-Détails et limites : [docs/mesures/phase2.md](docs/mesures/phase2.md).
+Détails et limites : [docs/mesures/phase3.md](docs/mesures/phase3.md).
 
 ## Organisation
 
@@ -71,7 +87,7 @@ Détails et limites : [docs/mesures/phase2.md](docs/mesures/phase2.md).
   [0002 Listing](docs/adr/0002-methode-listing.md) ·
   [0003 Index](docs/adr/0003-strategie-index.md) ·
   [0004 Panics](docs/adr/0004-strategie-panic.md)
-- Mesures : [phase 0](docs/mesures/phase0-prototype.md) · [phase 1](docs/mesures/phase1.md) · [phase 2](docs/mesures/phase2.md)
+- Mesures : [phase 0](docs/mesures/phase0-prototype.md) · [phase 1](docs/mesures/phase1.md) · [phase 2](docs/mesures/phase2.md) · [phase 3](docs/mesures/phase3.md)
 - [Notes Win32](docs/NOTES-WIN32.md)
 
 ## Développement

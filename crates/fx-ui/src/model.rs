@@ -180,8 +180,10 @@ impl FolderModel {
     pub fn on_icons(&self, delivered: Delivered) {
         let rows = {
             let mut c = self.icons.borrow_mut();
-            for (key, img) in delivered {
+            for (key, result) in delivered {
                 c.pending.remove(&key);
+                // Requête abandonnée : rien en cache, elle sera refaite si la ligne revient.
+                let Some(img) = result else { continue };
                 if matches!(key, IconKey::Item(_)) {
                     c.item_count += 1;
                 }
@@ -259,6 +261,12 @@ impl Model for FolderModel {
             },
             is_dir: e.is_dir(),
             dimmed: e.is_hidden(),
+            cloud: match e.cloud_state() {
+                fx_core::folder::CloudState::None => 0,
+                fx_core::folder::CloudState::OnlineOnly => 1,
+                fx_core::folder::CloudState::Local => 2,
+                fx_core::folder::CloudState::Pinned => 3,
+            },
             selected,
             focused,
             has_icon: icon.is_some(),

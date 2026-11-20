@@ -62,17 +62,18 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 - Les appels Shell qui exigent un STA tournent sur des threads dédiés initialisés en
   `COINIT_APARTMENTTHREADED`, avec leur propre pompe de messages et une fenêtre propriétaire
   cachée pour les menus.
-**État en phase 2** — threads réellement utilisés :
+**État en phase 3** — threads réellement utilisés :
 
 | Thread | Rôle |
 |---|---|
 | interface (STA OLE) | boucle Slint/winit, `IDropTarget`, source de glisser-déposer (`SHDoDragDrop`, exigé par OLE) |
-| `fx-list` (un par chargement, STA) | listing, types, tri initial |
+| `fx-list` (un par chargement, STA) | ouverture de la surveillance puis listing, types, tri initial ; annulable même bloqué dans le noyau (`CancelSynchronousIo`) |
 | pool `rayon` | tri, filtre, application des événements de surveillance (COM initialisé à la demande) |
 | `fx-watch` (un par dossier affiché) | `ReadDirectoryChangesW`, regroupement, lecture des entrées modifiées |
 | `fx-shell` (hôte Shell, STA OLE + fenêtre cachée) | menu contextuel, presse-papiers (propriétaire), ouverture de fichiers |
 | `fx-icon-0`, `fx-icon-1` (STA) | icônes des lignes affichées |
 | `fx-fileop` (un par opération, STA OLE) | `IFileOperation`, collage |
+| `fx-latency` (modes de mesure seulement) | sonde de latence du thread d'interface |
 | `fx-nav`, `fx-suggest` | volet de navigation (noms des lecteurs, délai de 1,5 s par lecteur), autocomplétion |
 
 - Chaque worker s'exécute sous `catch_unwind` (avec `panic = "unwind"` dans les crates de

@@ -48,6 +48,10 @@ pub enum LoadEvent {
         keys: Arc<NameKeys>,
         order: Vec<u32>,
         stats: LoadStats,
+        /// Surveillance du dossier, démarrée sur le thread de listing (jamais sur celui de
+        /// l'interface : l'ouverture d'un dossier réseau peut bloquer). Elle dure tant que
+        /// cette valeur existe.
+        watcher: Option<Box<dyn Send>>,
     },
     Failed {
         generation: u64,
@@ -88,7 +92,13 @@ pub struct Loader {
     source: Arc<dyn DirSource>,
     collator: Arc<dyn Collator>,
     types: TypeCache,
-    current: Mutex<Option<Arc<AtomicBool>>>,
+    current: Mutex<Option<Current>>,
+}
+
+/// Chargement en cours : jeton d'annulation et thread (pour annuler une E/S bloquée).
+struct Current {
+    token: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Loader {
@@ -105,31 +115,46 @@ impl Loader {
         self.collator.clone()
     }
 
-    /// Annule le chargement en cours, s'il y en a un.
-    pub fn cancel(&self) {
-        if let Ok(mut cur) = self.current.lock()
-            && let Some(token) = cur.take()
+    fn stop(&self, cur: Current) {
+        cur.token.store(true, Ordering::Relaxed);
+        if let Some(t) = &cur.thread
+            && !t.is_finished()
         {
-            token.store(true, Ordering::Relaxed);
+            // Débloque une E/S synchrone en cours (partage réseau injoignable…).
+            self.source.cancel_blocking(t);
+        }
+    }
+
+    /// Annule le chargement en cours, s'il y en a un, y compris une E/S bloquée.
+    pub fn cancel(&self) {
+        let cur = self.current.lock().ok().and_then(|mut c| c.take());
+        if let Some(cur) = cur {
+            self.stop(cur);
         }
     }
 
     /// Lance le chargement de `path` sur un thread dédié. Annule le chargement précédent.
-    pub fn load(&self, path: PathBuf, generation: u64, sort: SortSpec, sink: Sink) {
+    /// `watch` : si présent, la surveillance du dossier démarre sur ce même thread et ses
+    /// événements sont passés à ce récepteur.
+    pub fn load(
+        &self,
+        path: PathBuf,
+        generation: u64,
+        sort: SortSpec,
+        sink: Sink,
+        watch: Option<crate::source::WatchSink>,
+    ) {
+        self.cancel();
         let token = Arc::new(AtomicBool::new(false));
-        if let Ok(mut cur) = self.current.lock()
-            && let Some(old) = cur.replace(token.clone())
-        {
-            old.store(true, Ordering::Relaxed);
-        }
         let job = Job {
             source: self.source.clone(),
             collator: self.collator.clone(),
             types: self.types.clone(),
-            token,
+            token: token.clone(),
             path,
             generation,
             sort,
+            watch,
         };
         let sink2 = sink.clone();
         let spawned = std::thread::Builder::new().name("fx-list".into()).spawn(move || {
@@ -142,11 +167,19 @@ impl Loader {
                 });
             }
         });
-        if let Err(e) = spawned {
-            sink(LoadEvent::Failed {
+        match spawned {
+            Ok(thread) => {
+                if let Ok(mut cur) = self.current.lock() {
+                    *cur = Some(Current {
+                        token,
+                        thread: Some(thread),
+                    });
+                }
+            }
+            Err(e) => sink(LoadEvent::Failed {
                 generation,
                 error: SourceError::new(ErrorKind::Other, e.to_string()),
-            });
+            }),
         }
     }
 
@@ -291,11 +324,19 @@ struct Job {
     path: PathBuf,
     generation: u64,
     sort: SortSpec,
+    watch: Option<crate::source::WatchSink>,
 }
 
 impl Job {
-    fn run(self, sink: &Sink) {
+    fn run(mut self, sink: &Sink) {
         let _thread_state = self.source.init_worker_thread();
+        // Surveillance démarrée avant le listing : les changements survenus pendant le listing
+        // sont reçus et appliqués ensuite. Ouverture du dossier sur ce thread, jamais sur celui
+        // de l'interface.
+        let watcher = match self.watch.take() {
+            Some(w) if !self.token.load(Ordering::Relaxed) => self.source.watch(&self.path, w),
+            _ => None,
+        };
         let start = Instant::now();
         let generation = self.generation;
         let mut folder = Folder::with_capacity(self.path.clone(), 256);
@@ -385,6 +426,7 @@ impl Job {
                 keys,
                 order,
                 stats,
+                watcher,
             });
         }
     }
@@ -493,7 +535,7 @@ mod tests {
         );
         let l = loader(src);
         let (sink, rx) = channel_sink();
-        l.load(PathBuf::from("D"), 7, SortSpec::default(), sink);
+        l.load(PathBuf::from("D"), 7, SortSpec::default(), sink, None);
         let (generation, folder, order) = wait_complete(&rx).expect("événement Complete");
         assert_eq!(generation, 7);
         let names: Vec<String> = order.iter().map(|&i| folder.display_name(i)).collect();
@@ -518,7 +560,7 @@ mod tests {
     fn missing_folder_fails_with_kind() {
         let l = loader(MemorySource::default());
         let (sink, rx) = channel_sink();
-        l.load(PathBuf::from("nope"), 1, SortSpec::default(), sink);
+        l.load(PathBuf::from("nope"), 1, SortSpec::default(), sink, None);
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(LoadEvent::Failed { error, generation }) => {
                 assert_eq!(generation, 1);
@@ -534,7 +576,7 @@ mod tests {
         let refs: Vec<(&str, bool, u64)> = entries.iter().map(|(n, d, s)| (n.as_str(), *d, *s)).collect();
         let l = loader(MemorySource::default().with("big", &refs));
         let (sink, rx) = channel_sink();
-        l.load(PathBuf::from("big"), 1, SortSpec::default(), sink);
+        l.load(PathBuf::from("big"), 1, SortSpec::default(), sink, None);
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(LoadEvent::Partial { folder, order, .. }) => {
                 assert!(folder.len() >= FIRST_BATCH.min(5000) || !folder.is_empty());
@@ -558,9 +600,9 @@ mod tests {
         .with("fast", &[("x", false, 0)]);
         let l = loader(src);
         let (sink, rx) = channel_sink();
-        l.load(PathBuf::from("slow"), 1, SortSpec::default(), sink.clone());
+        l.load(PathBuf::from("slow"), 1, SortSpec::default(), sink.clone(), None);
         std::thread::sleep(Duration::from_millis(20));
-        l.load(PathBuf::from("fast"), 2, SortSpec::default(), sink);
+        l.load(PathBuf::from("fast"), 2, SortSpec::default(), sink, None);
         let (generation, folder, _) = wait_complete(&rx).expect("Complete");
         assert_eq!(generation, 2);
         assert_eq!(folder.len(), 1);
@@ -584,11 +626,72 @@ mod tests {
         }
     }
 
+    /// Source qui bloque comme un partage réseau injoignable, jusqu'à `cancel_blocking`.
+    struct BlockingSource {
+        released: std::sync::Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl DirSource for BlockingSource {
+        fn list(
+            &self,
+            _: &std::path::Path,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(&RawEntry<'_>),
+        ) -> Result<(), SourceError> {
+            let (lock, cv) = &*self.released;
+            let mut released = lock
+                .lock()
+                .map_err(|_| SourceError::new(ErrorKind::Other, "verrou"))?;
+            while !*released {
+                released = cv
+                    .wait(released)
+                    .map_err(|_| SourceError::new(ErrorKind::Other, "verrou"))?;
+            }
+            Err(SourceError::new(ErrorKind::Cancelled, "E/S annulée"))
+        }
+        fn type_name(&self, _: &[u16], _: bool) -> Option<String> {
+            None
+        }
+        fn cancel_blocking(&self, _: &std::thread::JoinHandle<()>) {
+            let (lock, cv) = &*self.released;
+            if let Ok(mut r) = lock.lock() {
+                *r = true;
+            }
+            cv.notify_all();
+        }
+    }
+
+    #[test]
+    fn cancel_unblocks_a_stuck_listing_without_any_event() {
+        let released = std::sync::Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let l = Loader::new(
+            Arc::new(BlockingSource {
+                released: released.clone(),
+            }),
+            Arc::new(PortableCollator),
+        );
+        let (sink, rx) = channel_sink();
+        l.load(
+            PathBuf::from(r"\injoignable\partage"),
+            1,
+            SortSpec::default(),
+            sink,
+            None,
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        l.cancel();
+        assert!(
+            released.0.lock().map(|r| *r).unwrap_or(false),
+            "cancel_blocking doit être appelé"
+        );
+        // Un listing annulé ne produit ni Complete ni Failed.
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    }
+
     #[test]
     fn worker_panic_becomes_a_clean_failure() {
         let l = Loader::new(Arc::new(PanickingSource), Arc::new(PortableCollator));
         let (sink, rx) = channel_sink();
-        l.load(PathBuf::from("x"), 9, SortSpec::default(), sink);
+        l.load(PathBuf::from("x"), 9, SortSpec::default(), sink, None);
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(LoadEvent::Failed { generation: 9, error }) => assert_eq!(error.kind, ErrorKind::Other),
             _ => panic!("attendu : Failed"),
@@ -596,7 +699,7 @@ mod tests {
         // Le chargeur reste utilisable après le panic.
         let l2 = loader(MemorySource::default().with("ok", &[("a", false, 0)]));
         let (sink, rx) = channel_sink();
-        l2.load(PathBuf::from("ok"), 1, SortSpec::default(), sink);
+        l2.load(PathBuf::from("ok"), 1, SortSpec::default(), sink, None);
         assert!(wait_complete(&rx).is_some());
     }
 
@@ -606,7 +709,7 @@ mod tests {
         let l =
             loader(MemorySource::default().with("D", &[("b", false, 1), ("a", false, 2), ("c", false, 3)]));
         let (sink, rx) = channel_sink();
-        l.load(PathBuf::from("D"), 1, SortSpec::default(), sink);
+        l.load(PathBuf::from("D"), 1, SortSpec::default(), sink, None);
         let (_, folder, _) = wait_complete(&rx).expect("Complete");
         let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
         let raw = |n: &str, size| OwnedRaw {
@@ -663,7 +766,7 @@ mod tests {
         let l =
             loader(MemorySource::default().with("D", &[("b", false, 5), ("a", false, 9), ("ab", false, 1)]));
         let (sink, rx) = channel_sink();
-        l.load(PathBuf::from("D"), 1, SortSpec::default(), sink);
+        l.load(PathBuf::from("D"), 1, SortSpec::default(), sink, None);
         let (_, folder, _) = wait_complete(&rx).expect("Complete");
         let keys = Arc::new(NameKeys::build(&folder, &PortableCollator));
         let (tx, rx2) = mpsc::channel();

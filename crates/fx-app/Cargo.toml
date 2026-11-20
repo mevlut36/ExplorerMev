@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 fx-ui.workspace = true
 fx-win.workspace = true
+toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
@@ -22,3 +23,6 @@ embed-resource = "3.0.12"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

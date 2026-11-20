@@ -182,3 +182,14 @@ pub fn client_to_screen(hwnd: isize, x: i32, y: i32) -> (i32, i32) {
     let _ = unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(HWND(hwnd as *mut c_void), &mut p) };
     (p.x, p.y)
 }
+
+/// Boîte de message d'erreur modale (dernier recours, ex. panic du thread d'interface).
+pub fn error_box(title: &str, text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    let t: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let m: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: deux chaînes terminées par un nul, vivantes pendant l'appel.
+    unsafe {
+        MessageBoxW(None, PCWSTR(m.as_ptr()), PCWSTR(t.as_ptr()), MB_OK | MB_ICONERROR);
+    }
+}

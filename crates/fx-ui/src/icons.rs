@@ -65,7 +65,13 @@ pub struct Request {
     pub generation: u64,
 }
 
-pub type Delivered = Vec<(IconKey, Option<IconImage>)>;
+/// Résultats : `Some(image)` chargée (ou `Some(None)` : pas d'icône) ; `None` : requête
+/// abandonnée (périmée), à redemander si la ligne est de nouveau affichée.
+pub type Delivered = Vec<(IconKey, Option<Option<IconImage>>)>;
+
+/// Au-delà, les requêtes d'icônes d'éléments les plus anciennes sont abandonnées : pendant un
+/// défilement rapide, elles concernent des lignes qui ne sont plus affichées.
+const MAX_PENDING_ITEMS: usize = 64;
 
 pub struct IconLoader {
     tx: Sender<Request>,
@@ -106,31 +112,70 @@ impl IconLoader {
     }
 }
 
+/// Les icônes d'éléments (lecture du fichier, plus coûteuse) attendent que les demandes se
+/// calment : pendant un défilement rapide, les lignes demandées disparaissent aussitôt.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(60);
+
+fn load(req: &Request) -> Option<IconImage> {
+    match &req.key {
+        IconKey::Type { dir, .. } => fx_win::icons::type_icon(&req.sample_name, *dir, req.size),
+        IconKey::Item(path) => fx_win::icons::item_icon(path, req.size)
+            .or_else(|| fx_win::icons::type_icon(&req.sample_name, false, req.size)),
+    }
+}
+
 fn worker(rx: Receiver<Request>, deliver: &dyn Fn(Delivered), generation: &AtomicU64) {
+    use crossbeam_channel::RecvTimeoutError;
     let _com = fx_win::com::ComApartment::sta().ok();
-    while let Ok(first) = rx.recv() {
-        let mut batch: Delivered = Vec::new();
-        let mut next = Some(first);
-        while let Some(req) = next {
-            let stale =
-                matches!(req.key, IconKey::Item(_)) && req.generation < generation.load(Ordering::Relaxed);
-            if !stale {
-                let img = match &req.key {
-                    IconKey::Type { dir, .. } => fx_win::icons::type_icon(&req.sample_name, *dir, req.size),
-                    IconKey::Item(path) => fx_win::icons::item_icon(path, req.size)
-                        .or_else(|| fx_win::icons::type_icon(&req.sample_name, false, req.size)),
-                };
-                batch.push((req.key, img));
-            }
-            // Regroupe ce qui est déjà en attente (au plus 32) pour limiter les rafraîchissements.
-            next = if batch.len() < 32 {
-                rx.try_recv().ok()
+    // Icônes d'éléments en attente de stabilisation, de la plus ancienne à la plus récente.
+    let mut held: Vec<Request> = Vec::new();
+    let mut last_item_at = std::time::Instant::now();
+    loop {
+        let first = if held.is_empty() {
+            rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        } else {
+            rx.recv_timeout(SETTLE.saturating_sub(last_item_at.elapsed()))
+        };
+        let incoming: Vec<Request> = match first {
+            Ok(r) => std::iter::once(r).chain(rx.try_iter()).collect(),
+            Err(RecvTimeoutError::Timeout) => Vec::new(),
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let mut out: Delivered = Vec::new();
+        // Icônes de type : tout de suite (peu coûteuses, partagées par extension).
+        for req in incoming {
+            if matches!(req.key, IconKey::Item(_)) {
+                last_item_at = std::time::Instant::now();
+                held.push(req);
             } else {
-                None
-            };
+                let img = load(&req);
+                out.push((req.key, Some(img)));
+            }
         }
-        if !batch.is_empty() {
-            deliver(batch);
+        // On ne garde que les demandes les plus récentes (lignes affichées maintenant).
+        let current = generation.load(Ordering::Relaxed);
+        if held.len() > MAX_PENDING_ITEMS {
+            let excess = held.len() - MAX_PENDING_ITEMS;
+            out.extend(held.drain(..excess).map(|r| (r.key, None)));
+        }
+        let (stale, fresh): (Vec<Request>, Vec<Request>) =
+            held.drain(..).partition(|r| r.generation < current);
+        out.extend(stale.into_iter().map(|r| (r.key, None)));
+        held = fresh;
+        if !out.is_empty() {
+            deliver(std::mem::take(&mut out));
+        }
+        if !held.is_empty() && last_item_at.elapsed() >= SETTLE {
+            for req in std::mem::take(&mut held).into_iter().rev() {
+                let img = load(&req);
+                out.push((req.key, Some(img)));
+                if out.len() >= 16 {
+                    deliver(std::mem::take(&mut out));
+                }
+            }
+            if !out.is_empty() {
+                deliver(out);
+            }
         }
     }
 }

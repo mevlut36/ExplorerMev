@@ -11,6 +11,8 @@ export struct Row {
     size: string,
     is-dir: bool,
     dimmed: bool,
+    // État cloud : 0 aucun, 1 en ligne seulement, 2 disponible localement, 3 toujours conservé.
+    cloud: int,
     selected: bool,
     focused: bool,
     has-icon: bool,
@@ -137,6 +139,7 @@ component FileRow inherits Rectangle {
     in property <string> rename-text;
     in property <int> rename-stem;
     in property <length> w-name;
+    in property <length> w-state;
     in property <length> w-date;
     in property <length> w-type;
     in property <length> w-size;
@@ -247,8 +250,22 @@ component FileRow inherits Rectangle {
             }
         }
     }
-    Text {
+    // Colonne État (OneDrive) : nuage = en ligne seulement, coche = disponible localement,
+    // coche pleine = toujours conservé.
+    if root.data.cloud > 0: Text {
         x: root.w-name + 12px;
+        width: root.w-state - 12px;
+        text: root.data.cloud == 1 ? "\u{E753}" : root.data.cloud == 2 ? "\u{E930}" : "\u{EC61}";
+        font-family: Theme.icons;
+        font-size: 14px;
+        color: root.data.cloud == 1 ? #4cc2ff : #6ccb5f;
+        vertical-alignment: center;
+        accessible-role: text;
+        accessible-label: root.data.cloud == 1 ? "Disponible en ligne seulement"
+            : root.data.cloud == 2 ? "Disponible sur cet appareil" : "Toujours disponible sur cet appareil";
+    }
+    Text {
+        x: root.w-name + root.w-state + 12px;
         width: root.w-date - 16px;
         text: root.data.modified;
         font-size: 12px;
@@ -257,7 +274,7 @@ component FileRow inherits Rectangle {
         overflow: elide;
     }
     Text {
-        x: root.w-name + root.w-date + 12px;
+        x: root.w-name + root.w-state + root.w-date + 12px;
         width: root.w-type - 16px;
         text: root.data.kind;
         font-size: 12px;
@@ -266,7 +283,7 @@ component FileRow inherits Rectangle {
         overflow: elide;
     }
     Text {
-        x: root.w-name + root.w-date + root.w-type;
+        x: root.w-name + root.w-state + root.w-date + root.w-type;
         width: root.w-size - 12px;
         text: root.data.size;
         font-size: 12px;
@@ -388,6 +405,7 @@ export component MainWindow inherits Window {
     callback key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
 
     in-out property <length> w-name: 340px;
+    in-out property <length> w-state: 56px;
     in-out property <length> w-date: 160px;
     in-out property <length> w-type: 170px;
     in-out property <length> w-size: 100px;
@@ -410,6 +428,12 @@ export component MainWindow inherits Window {
     public function row-anchor-y(row: int) -> length {
         list-area.absolute-position.y + file-list.content-y + (row + 1) * Theme.row-height
     }
+
+    // Mesure du défilement : position (px depuis le haut) et défilement maximal.
+    public function set-scroll(y: length) {
+        file-list.content-y = -y;
+    }
+    out property <length> max-scroll: max(0px, file-list.content-height - file-list.visible-height);
 
     public function focus-list() {
         list-focus.focus();
@@ -630,6 +654,10 @@ export component MainWindow inherits Window {
                                     clicked => { root.sort-by(0); }
                                 }
                                 HeaderCell {
+                                    text: "État";
+                                    col-width <=> root.w-state;
+                                }
+                                HeaderCell {
                                     text: "Modifié le";
                                     col-width <=> root.w-date;
                                     sorted: root.sort-column == 1;
@@ -697,6 +725,7 @@ export component MainWindow inherits Window {
                                         rename-text: root.rename-text;
                                         rename-stem: root.rename-stem;
                                         w-name: root.w-name;
+                                        w-state: root.w-state;
                                         w-date: root.w-date;
                                         w-type: root.w-type;
                                         w-size: root.w-size;

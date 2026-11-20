@@ -323,3 +323,52 @@ fn stat_entry_reads_one_entry() -> Res {
     assert!(fx_win::listing::stat_entry(dir.path(), &w("absent")).is_none());
     Ok(())
 }
+
+/// Partage injoignable (10.255.255.1 : adresse privée envoyée à la passerelle, sans réponse) :
+/// le listing bloque dans le noyau ; `cancel_synchronous_io` doit le débloquer vite.
+#[test]
+fn unreachable_share_listing_can_be_cancelled() -> Res {
+    use std::os::windows::io::AsRawHandle;
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let worker = std::thread::spawn(|| {
+        let r = list_dir(
+            Path::new(r"\\10.255.255.3\partage"),
+            &ListOptions::default(),
+            &|| false,
+            &mut |_| {},
+        );
+        (r.err().map(|e| e.to_string()), Instant::now())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let cancelled =
+        !worker.is_finished() && fx_win::process::cancel_synchronous_io(worker.as_raw_handle() as isize);
+    let (err, end) = worker.join().map_err(|_| "panic")?;
+    let took = end.duration_since(start);
+    println!("annulé={cancelled} durée={took:?} erreur={err:?}");
+    assert!(err.is_some(), "un partage injoignable doit échouer");
+    assert!(
+        took < Duration::from_secs(3),
+        "le listing doit se terminer vite (échec immédiat ou annulation) : {took:?}"
+    );
+    Ok(())
+}
+
+/// Mesure (ignorée par défaut, lente) : durée du blocage SANS annulation.
+#[test]
+#[ignore = "mesure lente : délai d'expiration SMB du système"]
+fn unreachable_share_timeout_without_cancel() {
+    use std::time::Instant;
+    let start = Instant::now();
+    let r = list_dir(
+        Path::new(r"\\10.255.255.4\partage"),
+        &ListOptions::default(),
+        &|| false,
+        &mut |_| {},
+    );
+    println!(
+        "sans annulation : {:?} après {:?}",
+        r.err().map(|e| e.to_string()),
+        start.elapsed()
+    );
+}

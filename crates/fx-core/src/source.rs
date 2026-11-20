@@ -108,6 +108,10 @@ pub trait DirSource: Send + Sync + 'static {
     fn watch(&self, _path: &Path, _sink: WatchSink) -> Option<Box<dyn Send>> {
         None
     }
+
+    /// Débloque une E/S synchrone en cours sur `thread` (annulation d'un chargement bloqué sur
+    /// un partage réseau). Par défaut : rien.
+    fn cancel_blocking(&self, _thread: &std::thread::JoinHandle<()>) {}
 }
 
 /// Source en mémoire pour les tests : dossiers déclarés à l'avance, délai optionnel par entrée.
