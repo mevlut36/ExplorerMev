@@ -363,7 +363,7 @@ reproduire.
   fichier disparaît, l'ouverture d'un dossier depuis les autres programmes échoue (Windows ne
   retombe pas sur l'Explorateur). D'où la confirmation qui affiche le chemin et la procédure
   de suppression manuelle dans le README.
-- **Effet réel non vérifié** : l'écriture, la lecture, la réversibilité et le refus devant les
-  clés d'un autre programme sont testés sur une clé de test de `HKCU` ; que Windows ouvre
-  effectivement WinDir pour un dossier n'a **pas** été observé (activer l'option modifie le
-  comportement de la machine).
+- **Effet réel vérifié** : option activée puis désactivée, `Start-Process`, `start` et
+  `ShellExecute` sans verbe sur un dossier ou un lecteur lancent bien `windir.exe` avec
+  l'argument `"<dossier>\."`, sans ouvrir de fenêtre de l'Explorateur. La touche Win+E n'a pas
+  été essayée (frappe simulée exclue).

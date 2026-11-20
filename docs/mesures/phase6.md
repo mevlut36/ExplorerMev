@@ -68,6 +68,14 @@ loupe (omise sous 48 px, où elle devient illisible). `app.ico` : 16, 24, 32, 48
   programme a un verbe `open` ou un verbe par défaut, état partiel signalé puis réparé.
 - **Vérifié** : WinDir lit correctement l'argument `"%1\."` pour un lecteur (`D:`), un chemin
   avec espaces et un dossier ordinaire (4 instances lancées puis fermées).
-- **Non vérifié** : que Windows ouvre effectivement WinDir pour un dossier une fois l'option
-  active. L'option n'est **pas activée** sur la machine de développement (`--default-explorer
-  status` : « Windows »).
+- **Vérifié en réel** (option activée environ une minute puis désactivée, sans frappe simulée) :
+  trois ouvertures de dossier par l'API du Shell lancent WinDir au lieu de l'Explorateur :
+  `Start-Process C:\Windows\System32` (titre « System32 — WinDir »), `start D:\` (« D:\ —
+  WinDir », ligne de commande `"D:\\."`) et `ShellExecute` sans verbe sur `C:\Users\Public`
+  (équivalent de Win+R, « Public — WinDir »). Le nombre de fenêtres de l'Explorateur n'a pas
+  changé (1 avant, 1 après). Après désactivation : `--default-explorer status` → « Windows »,
+  clés `Directory\shell\open`, `Drive\shell\open` et celle de Win+E absentes, valeur par
+  défaut de `Directory\shell` revenue à vide. La machine est revenue à son état d'origine.
+- **Non vérifié** : la touche Win+E elle-même (aurait demandé une frappe simulée, que je
+  m'interdis ; la même commande est déjà testée sur une clé de test) ; l'option activée depuis la
+  palette (la confirmation) plutôt que par `--default-explorer on` (même code d'écriture).
