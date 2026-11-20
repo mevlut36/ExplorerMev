@@ -328,7 +328,7 @@ reproduire.
 - **Registre isolé dans un paquet** (documenté par Microsoft, **non vérifié ici**, le paquet
   n'ayant pas été installé) : les écritures sous `HKCU` et dans `%APPDATA%` d'une application
   empaquetée sont redirigées vers un emplacement privé du paquet ; l'Explorateur ne voit donc
-  jamais la clé de « Remplacer Win+E ». L'option est refusée dans le paquet.
+  jamais les clés de l'option « explorateur par défaut ». L'option est refusée dans le paquet.
 - **Signature** : `signtool verify /pa` d'un paquet signé par un certificat auto-signé échoue
   avec « A certificate chain processed, but terminated in a root certificate which is not
   trusted » ; `Get-AuthenticodeSignature` renvoie `UnknownError`. C'est le comportement attendu
@@ -340,3 +340,30 @@ reproduire.
   `&` n'est attendu, et sa sortie n'est capturée, que s'il est dans un pipeline (`| Out-String`).
 - **Horodatage de signature** : demandé seulement avec `-TimestampUrl` ; il envoie l'empreinte du
   paquet à un serveur externe, sans intérêt pour un certificat auto-signé.
+
+## Explorateur par défaut (ouverture des dossiers)
+
+- **Ouverture d'un dossier** (lecture seule du registre de la machine de développement) : le
+  verbe `open` de `Folder\shell` est l'Explorateur, par `DelegateExecute`
+  `{11dbb47c-a525-400b-9e80-a54615a090c0}`. `Directory\shell` et `Drive\shell` ont pour valeur
+  par défaut `none` (côté machine) et portent les verbes des outils installés (Git, WSL, Visual
+  Studio, PowerShell…). Un verbe `open` posé sous `HKCU\Software\Classes\Directory\shell` et
+  `Drive\shell`, avec la valeur par défaut `open` sur `shell`, redirige l'ouverture. Les clés
+  utilisateur sont fusionnées avec celles de la machine : un `DelegateExecute` vide est écrit sur
+  la commande pour qu'aucun `DelegateExecute` hérité ne l'emporte.
+- **Argument `%1`** : le Shell passe `"%1"` ; pour un lecteur c'est `"D:\"`, et un guillemet
+  précédé d'une barre oblique inverse est lu comme un guillemet échappé (`D:"`). La commande
+  est donc `"<exe>" "%1\."` : `D:\\.` et `C:\dossier\.` sont normalisés par Windows
+  (`GetFullPathNameW`). Vérifié en lançant l'exécutable avec ces trois formes.
+- **Pas d'effet sur le shell** : `explorer.exe` reste le shell. Le détourner (Image File
+  Execution Options, clé `Shell` de Winlogon) remplacerait la barre des tâches et le bureau, que
+  WinDir ne fournit pas : non pris en charge. Les programmes qui exécutent `explorer.exe
+  /select,…` directement ne passent pas par ces verbes.
+- **Dépendance au chemin** : la commande désigne le chemin absolu de `windir.exe` ; si le
+  fichier disparaît, l'ouverture d'un dossier depuis les autres programmes échoue (Windows ne
+  retombe pas sur l'Explorateur). D'où la confirmation qui affiche le chemin et la procédure
+  de suppression manuelle dans le README.
+- **Effet réel non vérifié** : l'écriture, la lecture, la réversibilité et le refus devant les
+  clés d'un autre programme sont testés sur une clé de test de `HKCU` ; que Windows ouvre
+  effectivement WinDir pour un dossier n'a **pas** été observé (activer l'option modifie le
+  comportement de la machine).

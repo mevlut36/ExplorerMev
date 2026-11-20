@@ -129,8 +129,8 @@ enum Cmd {
     FolderSize,
     AddFavorite,
     RemoveFavorite,
-    WinEOn,
-    WinEOff,
+    DefaultOn,
+    DefaultOff,
     Search,
     IndexMft,
 }
@@ -172,8 +172,12 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
         "Indexation rapide par la MFT (administrateur)…",
         "",
     ),
-    (Cmd::WinEOn, "Remplacer Win+E par WinDir…", ""),
-    (Cmd::WinEOff, "Rendre Win+E à l'Explorateur", ""),
+    (
+        Cmd::DefaultOn,
+        "Utiliser WinDir comme explorateur par défaut…",
+        "",
+    ),
+    (Cmd::DefaultOff, "Rendre l'explorateur par défaut à Windows", ""),
 ];
 
 pub(crate) struct App {
@@ -1247,8 +1251,8 @@ impl App {
             Cmd::RemoveFavorite => self.remove_favorite(),
             Cmd::Search => self.ui.invoke_open_search(),
             Cmd::IndexMft => self.index_with_mft(),
-            Cmd::WinEOn => self.set_win_e(true),
-            Cmd::WinEOff => self.set_win_e(false),
+            Cmd::DefaultOn => self.set_default_explorer(true),
+            Cmd::DefaultOff => self.set_default_explorer(false),
         }
     }
 
@@ -1279,13 +1283,13 @@ impl App {
         }
     }
 
-    /// Option « Remplacer Win+E » (désactivée par défaut). L'activation est confirmée ; la
-    /// désactivation ne retire que la clé posée par WinDir.
-    fn set_win_e(self: &Rc<Self>, on: bool) {
+    /// Option « explorateur par défaut » (désactivée par défaut) : Win+E et l'ouverture des
+    /// dossiers depuis les autres programmes. L'activation est confirmée ; la désactivation ne
+    /// retire que ce que WinDir a posé.
+    fn set_default_explorer(self: &Rc<Self>, on: bool) {
         if fx_win::process::is_packaged() {
             self.active_pane().flash_status(
-                "Win+E ne peut pas être remplacé depuis le paquet MSIX (registre isolé) : utilisez la version portable."
-                    .into(),
+                "Impossible depuis le paquet MSIX (registre isolé) : utilisez la version portable.".into(),
             );
             return;
         }
@@ -1293,32 +1297,46 @@ impl App {
         let id = self.active_pane().id;
         let exe = std::env::current_exe();
         let posted = self.host_post_raw(move |_| {
-            let key = fx_win::win_e::WinEKey::default();
+            use fx_win::default_explorer::DefaultExplorer;
+            let key = DefaultExplorer::default();
             let msg = if on {
                 match exe {
                     Err(e) => format!("Chemin de WinDir introuvable : {e}"),
                     Ok(exe) => {
                         let ok = fx_win::shell::confirm(
                             owner,
-                            "Remplacer Win+E",
-                            "La touche Windows+E ouvrira WinDir au lieu de l'Explorateur, pour \
-                             votre compte uniquement.\n\nLa commande « Rendre Win+E à \
-                             l'Explorateur » (ou « windir --win-e off ») rétablit le \
-                             comportement d'origine.\n\nContinuer ?",
+                            "Explorateur par défaut",
+                            &format!(
+                                "WinDir s'ouvrira à la place de l'Explorateur de fichiers :\n\
+                                 • la touche Windows+E ;\n\
+                                 • les dossiers et lecteurs ouverts depuis un autre programme, \
+                                 Win+R ou le menu Démarrer.\n\n\
+                                 Cela ne vaut que pour votre compte. La barre des tâches, le bureau \
+                                 et le menu Démarrer restent ceux de Windows (explorer.exe), et les \
+                                 fenêtres de l'Explorateur déjà ouvertes ne sont pas touchées.\n\n\
+                                 Programme utilisé :\n{}\n\
+                                 Ne le déplacez pas et ne le supprimez pas tant que l'option est \
+                                 active : les dossiers ne s'ouvriraient plus.\n\n\
+                                 Pour revenir en arrière : commande « Rendre l'explorateur par \
+                                 défaut à Windows » (Ctrl+Maj+P) ou « windir --default-explorer off ».\n\n\
+                                 Continuer ?",
+                                exe.display()
+                            ),
                         );
                         if !ok {
                             return;
                         }
                         match key.enable(&exe) {
-                            Ok(()) => "Win+E ouvre désormais WinDir.".to_string(),
+                            Ok(()) => "WinDir est maintenant l'explorateur par défaut (Win+E et dossiers)."
+                                .to_string(),
                             Err(e) => e.to_string(),
                         }
                     }
                 }
             } else {
                 match key.disable() {
-                    Ok(true) => "Win+E ouvre de nouveau l'Explorateur.".to_string(),
-                    Ok(false) => "Win+E n'était pas associé à WinDir : rien à changer.".to_string(),
+                    Ok(true) => "L'Explorateur Windows est de nouveau l'explorateur par défaut.".to_string(),
+                    Ok(false) => "WinDir n'était pas l'explorateur par défaut : rien à changer.".to_string(),
                     Err(e) => format!("Registre : {}", e.message()),
                 }
             };

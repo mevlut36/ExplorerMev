@@ -55,7 +55,7 @@ impl Default for WinEKey {
     }
 }
 
-struct Key(HKEY);
+pub(crate) struct Key(pub(crate) HKEY);
 
 impl Drop for Key {
     fn drop(&mut self) {
@@ -66,7 +66,7 @@ impl Drop for Key {
     }
 }
 
-fn check(e: WIN32_ERROR) -> windows::core::Result<()> {
+pub(crate) fn check(e: WIN32_ERROR) -> windows::core::Result<()> {
     e.ok()
 }
 
@@ -84,7 +84,7 @@ impl WinEKey {
         format!(r"{}\shell\opennewwindow\command", self.clsid_key())
     }
 
-    fn open(path: &str) -> windows::core::Result<Option<Key>> {
+    pub(crate) fn open(path: &str) -> windows::core::Result<Option<Key>> {
         let mut h = HKEY::default();
         // SAFETY: chaîne HSTRING vivante pendant l'appel ; `h` reçoit une clé que `Key` ferme.
         let r = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(path), Some(0), KEY_READ, &mut h) };
@@ -95,7 +95,7 @@ impl WinEKey {
         Ok(Some(Key(h)))
     }
 
-    fn read(key: &Key, name: &str) -> windows::core::Result<Option<String>> {
+    pub(crate) fn read(key: &Key, name: &str) -> windows::core::Result<Option<String>> {
         let name = HSTRING::from(name);
         let mut buf = vec![0u16; 1024];
         let mut bytes = (buf.len() * 2) as u32;
@@ -212,7 +212,7 @@ impl WinEKey {
     }
 }
 
-fn set_string(key: &Key, name: &str, value: &str) -> windows::core::Result<()> {
+pub(crate) fn set_string(key: &Key, name: &str, value: &str) -> windows::core::Result<()> {
     let data: Vec<u8> = value
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -230,7 +230,48 @@ fn set_string(key: &Key, name: &str, value: &str) -> windows::core::Result<()> {
     }
 }
 
-fn unquote(command: &str) -> &str {
+/// Crée (ou ouvre) la clé `HKCU\<path>` en écriture.
+pub(crate) fn create_key(path: &str) -> windows::core::Result<Key> {
+    let mut h = HKEY::default();
+    // SAFETY: chaîne HSTRING vivante pendant l'appel ; `h` reçoit une clé que `Key` ferme.
+    unsafe {
+        check(RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(path),
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut h,
+            None,
+        ))?;
+    }
+    Ok(Key(h))
+}
+
+/// Supprime la valeur `name` de la clé (`""` : valeur par défaut). Absente : sans effet.
+pub(crate) fn delete_value(key: &Key, name: &str) -> windows::core::Result<()> {
+    use windows::Win32::System::Registry::RegDeleteValueW;
+    // SAFETY: clé ouverte en écriture ; chaîne vivante pendant l'appel.
+    let r = unsafe { RegDeleteValueW(key.0, &HSTRING::from(name)) };
+    if r == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    check(r)
+}
+
+/// Supprime `HKCU\<path>` et ses sous-clés. Absente : sans effet.
+pub(crate) fn delete_tree(path: &str) -> windows::core::Result<()> {
+    // SAFETY: chaîne HSTRING vivante pendant l'appel.
+    let r = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(path)) };
+    if r == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    check(r)
+}
+
+pub(crate) fn unquote(command: &str) -> &str {
     let c = command.trim();
     if let Some(rest) = c.strip_prefix('"') {
         rest.split('"').next().unwrap_or(rest)

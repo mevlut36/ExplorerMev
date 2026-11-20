@@ -8,7 +8,7 @@ plus léger que l'Explorateur Windows.
 > rafraîchissement automatique, partages réseau annulables, état OneDrive ; onglets avec
 > restauration de session, double volet, vue icônes avec vignettes, volet d'aperçu (texte,
 > images, PDF/Office par les prévisualiseurs de Windows), palette de commandes, taille des
-> dossiers, favoris, terminal, copie du chemin, propriétés, option « Remplacer Win+E » ;
+> dossiers, favoris, terminal, copie du chemin, propriétés, option « explorateur par défaut » (Win+E et dossiers) ;
 > recherche par nom sur tous les volumes NTFS (Ctrl+Maj+F), sans droits ou, sur demande, par
 > la MFT. Paquet MSIX signé (certificat auto-signé), archive portable, manifestes winget.
 
@@ -20,7 +20,7 @@ WinDir n'a pas encore de version publiée : les livrables se produisent avec
 **Archive portable** (recommandée, aucun certificat requis) : décompresser
 `WinDir_<version>_x64_portable.zip` où l'on veut ; `windir.exe` est le seul fichier. Aucune
 installation : WinDir n'écrit que dans `%APPDATA%\WinDir` et `%LOCALAPPDATA%\WinDir` (et, si vous
-activez « Remplacer Win+E », une clé de votre compte dans le registre).
+activez « explorateur par défaut », des clés de votre compte dans le registre).
 
 **Paquet MSIX** : signé par un certificat **auto-signé** (`WinDir.cer`), que Windows ne connaît
 pas. Pour l'installer sur un poste, approuver d'abord ce certificat (invite administrateur),
@@ -101,11 +101,28 @@ jamais écrasé. Les options de la ligne de commande sont prioritaires (`windir 
 Les onglets (et leur double volet) sont restaurés au lancement sans dossier en argument
 (`%APPDATA%\WinDir\session.txt`) ; les favoris sont dans `%APPDATA%\WinDir\favoris.txt`.
 
-**Remplacer Win+E** (désactivé par défaut) : commande « Remplacer Win+E par WinDir… » de la
-palette (confirmée), ou `windir --win-e on`. « Rendre Win+E à l'Explorateur » ou
-`windir --win-e off` rétablit le comportement d'origine ; `windir --win-e status` affiche l'état.
-Seule une clé de l'utilisateur courant est écrite ; WinDir refuse si un autre programme a déjà
-pris Win+E.
+**Explorateur par défaut** (désactivé par défaut) : commande « Utiliser WinDir comme explorateur
+par défaut… » de la palette (Ctrl+Maj+P), qui demande confirmation, ou `windir --default-explorer on`.
+Pour votre compte seulement, WinDir s'ouvre alors :
+
+- avec la touche **Windows+E** ;
+- quand un **dossier ou un lecteur** est ouvert depuis un autre programme, avec Win+R ou depuis le
+  menu Démarrer (verbe `open` des classes `Directory` et `Drive`).
+
+Ne change pas : `explorer.exe` reste le shell de Windows (barre des tâches, bureau, menu
+Démarrer) ; remplacer le shell n'est pas pris en charge. Les fenêtres de l'Explorateur déjà
+ouvertes, leur navigation interne et les programmes qui lancent `explorer.exe` directement
+(par exemple « Afficher dans le dossier » de certains logiciels) ne sont pas interceptés.
+
+Retour en arrière : « Rendre l'explorateur par défaut à Windows » (palette) ou
+`windir --default-explorer off` ; `windir --default-explorer status` affiche l'état. Seules les
+clés de votre compte posées par WinDir sont retirées (elles portent un marqueur) ; si un autre
+programme a déjà pris un de ces emplacements, WinDir n'y touche pas. **Ne déplacez pas et ne
+supprimez pas `windir.exe` tant que l'option est active** : les dossiers ouverts depuis les autres
+programmes ne s'ouvriraient plus. Si cela arrive, supprimer à la main
+`HKCU\Software\Classes\Directory\shell\open`, `HKCU\Software\Classes\Drive\shell\open` et
+`HKCU\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}`. `windir --win-e on|off`
+ne règle que la touche Win+E.
 
 **Recherche** (Ctrl+Maj+F) : index des noms de tous les volumes NTFS fixes, construit à la
 première recherche en parcourant les dossiers (sans droits, en priorité arrière-plan), puis tenu
@@ -141,7 +158,7 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
   mesurées. Le comportement de l'élévation depuis le paquet MSIX n'est pas vérifié non plus.
 - **Paquet MSIX** : construit, signé et vérifié (intégrité, schéma du manifeste), mais **jamais
   installé** : le certificat est auto-signé et n'est approuvé nulle part sur la machine de
-  développement. Dans le paquet, « Remplacer Win+E » est refusé (le registre y est isolé) et les
+  développement. Dans le paquet, « explorateur par défaut » est refusé (le registre y est isolé) et les
   réglages sont lus et écrits dans un emplacement privé du paquet
   (`%LOCALAPPDATA%\Packages\…\LocalCache`), pas dans `%APPDATA%\WinDir`.
 - **OneDrive** : jamais de lecture, de vignette ni d'aperçu d'un fichier « en ligne seulement »,

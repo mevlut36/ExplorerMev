@@ -32,7 +32,9 @@ Options :
   --self-test <dossier vide>  scénario d'auto-test dans ce dossier (créé et modifié !), puis quitte
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
   --out <fichier>             écrit aussi le rapport de mesure dans <fichier>
-  --win-e <on|off|status>     Win+E ouvre WinDir (on) ou l'Explorateur (off), puis quitte
+  --default-explorer <on|off|status>
+                              WinDir explorateur par défaut (Win+E et ouverture des dossiers), puis quitte
+  --win-e <on|off|status>     seulement Win+E ouvre WinDir (on) ou l'Explorateur (off), puis quitte
   -V, --version               affiche la version
   -h, --help                  affiche cette aide
 
@@ -57,6 +59,7 @@ struct Args {
     help: bool,
     version: bool,
     win_e: Option<String>,
+    default_explorer: Option<String>,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
@@ -78,6 +81,7 @@ fn parse_args() -> anyhow::Result<Args> {
         help: false,
         version: false,
         win_e: None,
+        default_explorer: None,
     };
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
@@ -123,6 +127,13 @@ fn parse_args() -> anyhow::Result<Args> {
             Some("--out") => a.out = Some(it.next().context("--out attend un fichier")?.into()),
             Some("-h" | "--help" | "/?") => a.help = true,
             Some("-V" | "--version") => a.version = true,
+            Some("--default-explorer") => {
+                let v = it.next().context("--default-explorer attend on, off ou status")?;
+                match v.to_str() {
+                    Some(s @ ("on" | "off" | "status")) => a.default_explorer = Some(s.into()),
+                    _ => bail!("--default-explorer attend on, off ou status"),
+                }
+            }
             Some("--win-e") => {
                 let v = it.next().context("--win-e attend on, off ou status")?;
                 match v.to_str() {
@@ -135,6 +146,54 @@ fn parse_args() -> anyhow::Result<Args> {
         }
     }
     Ok(a)
+}
+
+/// `--default-explorer on|off|status` : Win+E et ouverture des dossiers (installation,
+/// désinstallation, scripts).
+fn default_explorer(action: &str) -> ExitCode {
+    use fx_win::default_explorer::{DefaultExplorer, DefaultState};
+    if fx_win::process::is_packaged() {
+        eprintln!(
+            "Impossible depuis le paquet MSIX (le registre y est isolé) : utilisez la version portable."
+        );
+        return ExitCode::FAILURE;
+    }
+    let key = DefaultExplorer::default();
+    let result: anyhow::Result<String> = (|| {
+        Ok(match action {
+            "on" => {
+                let exe = std::env::current_exe()?;
+                key.enable(&exe)?;
+                format!("WinDir est l'explorateur par défaut : {}", exe.display())
+            }
+            "off" => {
+                if key.disable()? {
+                    "L'Explorateur Windows est de nouveau l'explorateur par défaut.".into()
+                } else {
+                    "WinDir n'était pas l'explorateur par défaut : rien à changer.".into()
+                }
+            }
+            _ => match key.state()? {
+                DefaultState::Windows => "Explorateur par défaut : Windows.".into(),
+                DefaultState::WinDir(p) => format!("Explorateur par défaut : WinDir ({}).", p.display()),
+                DefaultState::Partial => {
+                    "Explorateur par défaut : partiellement WinDir (relancer --default-explorer on ou off)."
+                        .into()
+                }
+                DefaultState::Other(what) => format!("Explorateur par défaut : autre programme ({what})."),
+            },
+        })
+    })();
+    match result {
+        Ok(msg) => {
+            println!("{msg}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `--win-e on|off|status` : option « Remplacer Win+E » sans interface (installation,
@@ -254,7 +313,7 @@ fn main() -> ExitCode {
         || args.self_test.is_some()
         || args.bench_scroll.is_some()
         || args.bench_search;
-    if args.help || args.version || benching || args.win_e.is_some() {
+    if args.help || args.version || benching || args.win_e.is_some() || args.default_explorer.is_some() {
         // Sous-système GUI : on se rattache à la console du parent pour y écrire.
         fx_win::process::attach_parent_console();
     }
@@ -268,6 +327,9 @@ fn main() -> ExitCode {
     }
     if let Some(action) = &args.win_e {
         return win_e(action);
+    }
+    if let Some(action) = &args.default_explorer {
+        return default_explorer(action);
     }
     // Les mesures et l'auto-test ignorent la configuration de l'utilisateur (reproductibilité).
     let (cfg, warnings) = match (benching, config::default_path()) {

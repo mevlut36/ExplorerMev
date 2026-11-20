@@ -10,6 +10,7 @@ pub mod access;
 pub mod clipboard;
 pub mod com;
 pub mod context_menu;
+pub mod default_explorer;
 pub mod dragdrop;
 pub mod dwm;
 pub mod fileop;

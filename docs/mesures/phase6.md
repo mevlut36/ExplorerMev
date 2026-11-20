@@ -1,4 +1,4 @@
-# Mesures de la phase 6 — distribution
+﻿# Mesures de la phase 6 — distribution
 
 Même banc que les phases précédentes (Ryzen 5 5600X, Windows 11 Pro, échelle 100 %). Cette phase
 n'a pas de cible chiffrée : on vérifie ce que les livrables sont, ce qui a été contrôlé, et que
@@ -49,10 +49,25 @@ loupe (omise sous 48 px, où elle devient illisible). `app.ico` : 16, 24, 32, 48
   (invite administrateur, modification des magasins de confiance de la machine), ce que je n'ai
   pas fait sans votre accord. Donc non observés : l'installation elle-même, l'alias `windir`
   dans un terminal, les tuiles, la détection d'identité de paquet (testée **hors** paquet
-  seulement), le refus de « Remplacer Win+E » dans le paquet, l'emplacement réel des réglages
+  seulement), le refus de « explorateur par défaut » dans le paquet, l'emplacement réel des réglages
   dans le paquet, le lancement de l'assistant élevé depuis le paquet.
 - **Installation par winget** : l'URL de l'archive n'existe pas ; `winget install` n'a pas été
   essayé (il faudrait aussi activer les manifestes locaux, réglage administrateur).
 - **Smartscreen / antivirus** sur un exécutable non signé : non évalué.
 - **Fichiers de licence** : aucune licence dans le dépôt ; le manifeste winget généré porte
   `Proprietary` par défaut, à remplacer.
+
+## Option « explorateur par défaut » (ajoutée après la phase 6)
+
+- Commande de la palette et `windir --default-explorer on|off|status` : Win+E et ouverture des
+  dossiers et lecteurs (verbe `open` de `Directory` et `Drive`, clés du compte courant, avec
+  marqueur). Remplace l'ancienne commande « Remplacer Win+E » (le réglage `--win-e` reste).
+- **Testé** (4 tests, clé de test de `HKCU`, supprimée ensuite ; aucune clé de l'utilisateur
+  modifiée) : activation, mise à jour du chemin, désactivation qui rétablit tout (y compris la
+  valeur par défaut de `shell`), clé voisine d'un autre outil intacte, refus si un autre
+  programme a un verbe `open` ou un verbe par défaut, état partiel signalé puis réparé.
+- **Vérifié** : WinDir lit correctement l'argument `"%1\."` pour un lecteur (`D:`), un chemin
+  avec espaces et un dossier ordinaire (4 instances lancées puis fermées).
+- **Non vérifié** : que Windows ouvre effectivement WinDir pour un dossier une fois l'option
+  active. L'option n'est **pas activée** sur la machine de développement (`--default-explorer
+  status` : « Windows »).
