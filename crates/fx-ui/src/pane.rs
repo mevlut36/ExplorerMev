@@ -137,6 +137,8 @@ pub(crate) struct UiState {
     pub drop_row: i32,
     /// 0 détails, 1 icônes.
     pub view_mode: i32,
+    /// Page d'accueil à la place de la liste.
+    pub home: bool,
 }
 
 impl Default for UiState {
@@ -153,6 +155,7 @@ impl Default for UiState {
             rename_stem: 0,
             drop_row: -1,
             view_mode: 0,
+            home: false,
         }
     }
 }
@@ -254,6 +257,7 @@ impl Pane {
                 ui.set_rename_row_1(s.rename_row);
                 ui.set_drop_row_1(s.drop_row);
                 ui.set_view_mode_1(s.view_mode);
+                ui.set_home_1(s.home);
             } else {
                 ui.set_status_0(s.status);
                 ui.set_error_text_0(s.error);
@@ -266,6 +270,7 @@ impl Pane {
                 ui.set_rename_row_0(s.rename_row);
                 ui.set_drop_row_0(s.drop_row);
                 ui.set_view_mode_0(s.view_mode);
+                ui.set_home_0(s.home);
             }
         });
     }
@@ -396,7 +401,7 @@ impl Pane {
     /// Met à jour les éléments globaux de la fenêtre pour ce volet (s'il est actif) :
     /// adresse, fil d'Ariane, titre, boutons, filtre, volet de navigation.
     pub(crate) fn sync_global(&self) {
-        let Some(path) = self.current_path() else { return };
+        let Some(path) = self.location() else { return };
         let filter_text = self.st.borrow().filter_text.clone();
         let (can_back, can_forward) = {
             let h = self.history.borrow();
@@ -411,7 +416,11 @@ impl Pane {
                     path: p.display().to_string().into(),
                 })
                 .collect();
-        let shown = fx_win::path::display_form(&path);
+        let shown = if crate::home::is_home(&path) {
+            PathBuf::from("Accueil")
+        } else {
+            fx_win::path::display_form(&path)
+        };
         let title = crate::nav::title_of(&path);
         self.ui_global(|ui| {
             ui.set_address(shown.display().to_string().into());
@@ -449,11 +458,66 @@ impl Pane {
 }
 
 impl Pane {
+    /// Dossier affiché, `None` sur la page d'accueil (qui n'est pas un dossier : toutes les actions
+    /// sur le disque sont alors sans effet).
     pub(crate) fn current_path(&self) -> Option<PathBuf> {
+        self.location().filter(|p| !crate::home::is_home(p))
+    }
+
+    /// Emplacement affiché : un dossier ou la page d'accueil (adresse, onglets, session).
+    pub(crate) fn location(&self) -> Option<PathBuf> {
         self.history.borrow().current().map(Path::to_path_buf)
     }
 
+    pub(crate) fn is_home(&self) -> bool {
+        self.location().is_some_and(|p| crate::home::is_home(&p))
+    }
+
+    /// Affiche la page d'accueil dans ce volet.
+    fn show_home(self: &Rc<Self>, push: bool) {
+        self.generation.set(self.generation.get() + 1);
+        self.loader.cancel();
+        if push {
+            self.history.borrow_mut().navigate(crate::home::home_path());
+        }
+        {
+            let mut st = self.st.borrow_mut();
+            st.complete = true;
+            st.folder = None;
+            st.watcher = None;
+            st.queued.clear();
+            st.pending_select.clear();
+            st.pending_rename = false;
+            st.rename_entry = None;
+            st.press_deferred = None;
+            st.marquee_base = None;
+            for j in st.size_jobs.drain(..) {
+                j.cancel();
+            }
+        }
+        self.model.clear();
+        self.ui_rename_row(-1);
+        self.ui_error(SharedString::new());
+        self.ui_filtering(false);
+        self.ui_loading(false);
+        self.ui_status(SharedString::new());
+        self.ui_with(|u| u.home = true);
+        self.ui_global(|ui| {
+            ui.set_address_editing(false);
+            ui.set_filter_text(SharedString::new());
+        });
+        self.sync_global();
+        with_app(|a| {
+            a.on_pane_location_changed();
+            a.on_home_shown();
+        });
+    }
+
     pub(crate) fn navigate(self: &Rc<Self>, path: PathBuf, push: bool, select: Vec<Vec<u16>>) {
+        if crate::home::is_home(&path) {
+            self.show_home(push);
+            return;
+        }
         let pid = self.id;
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
@@ -461,6 +525,7 @@ impl Pane {
             self.history.borrow_mut().navigate(path.clone());
         }
         self.ui_rename_row(-1);
+        self.ui_with(|u| u.home = false);
         let spec = {
             let mut st = self.st.borrow_mut();
             st.complete = false;
@@ -546,6 +611,10 @@ impl Pane {
             }
             return;
         }
+        if crate::home::is_home_text(t) {
+            self.navigate(crate::home::home_path(), true, Vec::new());
+            return;
+        }
         let path = std::path::absolute(t).unwrap_or_else(|_| PathBuf::from(t));
         if self
             .current_path()
@@ -582,6 +651,10 @@ impl Pane {
     }
 
     pub(crate) fn refresh(self: &Rc<Self>) {
+        if self.is_home() {
+            with_app(|a| a.refresh_home());
+            return;
+        }
         let Some(cur) = self.current_path() else { return };
         let select = self.selected_names();
         self.navigate(cur, false, select);
@@ -1126,6 +1199,8 @@ impl Pane {
                 self.go_forward();
             } else if is(Key::UpArrow) {
                 self.go_up();
+            } else if is(Key::Home) {
+                self.navigate(crate::home::home_path(), true, Vec::new());
             } else {
                 return false;
             }

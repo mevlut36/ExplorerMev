@@ -21,6 +21,7 @@ pub use generated::*;
 mod app;
 mod appearance;
 mod bench;
+mod home;
 mod icons;
 mod model;
 mod nav;
@@ -33,6 +34,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 pub use app::BenchMode;
+pub use home::home_path;
 
 /// Options de lancement de l'interface.
 #[derive(Debug, Clone)]

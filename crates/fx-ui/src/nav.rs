@@ -28,6 +28,12 @@ pub fn build(ready: impl FnOnce(Vec<NavEntry>) + Send + 'static) {
         let _com = fx_win::com::ComApartment::sta().ok();
         let mut out = Vec::new();
         out.push(NavEntry {
+            label: "Accueil".into(),
+            glyph: "\u{E80F}",
+            path: crate::home::home_path(),
+            header: false,
+        });
+        out.push(NavEntry {
             label: "Accès rapide".into(),
             glyph: "",
             path: PathBuf::new(),
@@ -115,6 +121,9 @@ pub fn build(ready: impl FnOnce(Vec<NavEntry>) + Send + 'static) {
 /// Titre court d'un dossier (fenêtre, onglet) : son nom, « Linux » pour la racine WSL, le nom de
 /// la distribution pour sa racine, le chemin entier pour une racine de lecteur.
 pub fn title_of(path: &Path) -> String {
+    if crate::home::is_home(path) {
+        return "Accueil".into();
+    }
     if fx_core::wsl::is_root(path) {
         return "Linux".into();
     }
@@ -137,6 +146,9 @@ pub fn title_of(path: &Path) -> String {
 /// Segments du fil d'Ariane : (libellé, chemin). La racine prend le nom du lecteur s'il est
 /// connu (« Disque local (C:) »).
 pub fn crumbs(path: &Path, drive_labels: &HashMap<PathBuf, String>) -> Vec<(String, PathBuf)> {
+    if crate::home::is_home(path) {
+        return vec![("Accueil".into(), crate::home::home_path())];
+    }
     let shown = fx_win::path::display_form(path);
     // Racine « Linux » : un segment lui est consacré.
     if fx_core::wsl::is_root(&shown) {

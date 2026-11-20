@@ -135,6 +135,7 @@ enum Cmd {
     IndexMft,
     NewFile,
     Appearance,
+    Home,
 }
 
 const COMMANDS: &[(Cmd, &str, &str)] = &[
@@ -161,6 +162,7 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::NewFolder, "Nouveau dossier", "Ctrl+Maj+N"),
     (Cmd::NewFile, "Nouveau fichier", ""),
     (Cmd::Appearance, "Apparence : mode clair ou sombre, couleurs…", ""),
+    (Cmd::Home, "Accueil", "Alt+Origine"),
     (Cmd::SelectAll, "Tout sélectionner", "Ctrl+A"),
     (Cmd::Rename, "Renommer", "F2"),
     (Cmd::Delete, "Supprimer (corbeille)", "Suppr"),
@@ -211,6 +213,10 @@ pub(crate) struct App {
     /// Apparence choisie (mode, accent, teinte) et thème de Windows.
     appearance: Cell<crate::appearance::Appearance>,
     theme_forced: bool,
+    /// Données de la page d'accueil (dernier calcul) et colonnes de cartes affichées.
+    home_data: RefCell<crate::home::HomeData>,
+    home_columns: Cell<usize>,
+    home_seq: Cell<u64>,
     system_dark: Cell<bool>,
     /// Moteur de recherche, démarré à la première ouverture de la recherche.
     search: RefCell<Option<fx_core::search_engine::Engine>>,
@@ -297,6 +303,9 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
             None => crate::appearance::load(options.data_dir.as_deref()),
         }),
         theme_forced: options.theme_override.is_some() || options.bench.is_some(),
+        home_data: RefCell::default(),
+        home_columns: Cell::new(3),
+        home_seq: Cell::new(0),
         system_dark: Cell::new(fx_win::dwm::system_prefers_dark()),
         search: RefCell::new(None),
         search_gen: Cell::new(0),
@@ -400,10 +409,15 @@ fn wire_callbacks(ui: &MainWindow) {
     ui.on_go_forward(|| with_app(|a| a.active_pane().go_forward()));
     ui.on_go_up(|| with_app(|a| a.active_pane().go_up()));
     ui.on_refresh(|| with_app(|a| a.active_pane().refresh()));
-    ui.on_nav_activated(|p| {
+    ui.on_nav_activated(|p| with_app(|a| a.nav_activated(PathBuf::from(p.as_str()))));
+    ui.on_home_open(|path, is_dir| with_app(|a| a.home_open(PathBuf::from(path.as_str()), is_dir)));
+    ui.on_home_pin(|path, pin| with_app(|a| a.home_pin(PathBuf::from(path.as_str()), pin)));
+    ui.on_home_columns_changed(|c| {
         with_app(|a| {
-            a.active_pane()
-                .navigate(PathBuf::from(p.as_str()), true, Vec::new())
+            let c = usize::try_from(c).unwrap_or(1).max(1);
+            if a.home_columns.replace(c) != c {
+                a.rebuild_home_lines();
+            }
         })
     });
     ui.on_crumb_activated(|p| with_app(|a| a.active_pane().navigate_to(&p)));
@@ -661,7 +675,7 @@ impl App {
     fn new_tab_here(self: &Rc<Self>) {
         let path = self
             .active_pane()
-            .current_path()
+            .location()
             .unwrap_or_else(|| PathBuf::from(r"C:\"));
         self.open_tab(path, None, false, true);
     }
@@ -685,9 +699,9 @@ impl App {
     fn show_tab(self: &Rc<Self>) {
         let t = self.active_tab();
         let dual = t.dual.get();
-        if dual && t.panes[1].current_path().is_none() {
+        if dual && t.panes[1].location().is_none() {
             // Premier passage en double volet : le volet droit s'ouvre sur le même dossier.
-            if let Some(p) = t.panes[0].current_path() {
+            if let Some(p) = t.panes[0].location() {
                 t.panes[1].navigate(p, true, Vec::new());
             }
         }
@@ -753,7 +767,7 @@ impl App {
             p.loader.cancel();
         }
         self.closed_tabs.borrow_mut().push(ClosedTab {
-            paths: [tab.panes[0].current_path(), tab.panes[1].current_path()],
+            paths: [tab.panes[0].location(), tab.panes[1].location()],
             dual: tab.dual.get(),
         });
         let active = self.active_tab.get();
@@ -799,7 +813,7 @@ impl App {
             .map(|(i, t)| {
                 let p = &t.panes[if t.dual.get() { t.focus.get() } else { 0 }];
                 let title = p
-                    .current_path()
+                    .location()
                     .map(|path| crate::nav::title_of(&path))
                     .unwrap_or_default();
                 TabItem {
@@ -844,11 +858,7 @@ impl App {
         let Some(file) = self.session_file() else { return };
         let mut out = format!("explorermev-session 1\nactif\t{}\n", self.active_tab.get());
         for t in self.tabs.borrow().iter() {
-            let path = |p: &Pane| {
-                p.current_path()
-                    .map(|x| x.display().to_string())
-                    .unwrap_or_default()
-            };
+            let path = |p: &Pane| p.location().map(|x| x.display().to_string()).unwrap_or_default();
             out += &format!(
                 "onglet\t{}\t{}\t{}\t{}\n",
                 t.dual.get() as u8,
@@ -906,6 +916,10 @@ impl App {
         }
         *self.nav_entries.borrow_mut() = entries;
         self.active_pane().sync_global();
+        // L'accueil s'est affiché avant que le volet de gauche soit prêt : on le complète.
+        if self.active_pane().is_home() {
+            self.refresh_home();
+        }
     }
 
     pub(crate) fn refresh_nav_items(&self, current: &Path) {
@@ -913,7 +927,7 @@ impl App {
         let favorites = self.favorites.borrow();
         if !favorites.is_empty() {
             items.push(NavItem {
-                label: "Favoris".into(),
+                label: "Épinglés".into(),
                 glyph: "".into(),
                 path: "".into(),
                 header: true,
@@ -1285,6 +1299,7 @@ impl App {
             Cmd::NewFolder => pane.new_folder(),
             Cmd::NewFile => pane.new_file(),
             Cmd::Appearance => self.ui.invoke_show_appearance(),
+            Cmd::Home => pane.navigate(crate::home::home_path(), true, Vec::new()),
             Cmd::SelectAll => {
                 pane.model.update_selection(|s, v| s.select_all(v));
                 pane.update_status();
@@ -1501,12 +1516,136 @@ impl App {
         poll_sizes(pane.id, generation, jobs);
     }
 
+    // ------------------------------------------------------------------ page d'accueil
+
+    /// Activation d'une entrée du volet de gauche : un favori peut être un fichier (on l'ouvre).
+    fn nav_activated(self: &Rc<Self>, path: PathBuf) {
+        let is_favorite = self.favorites.borrow().iter().any(|f| same_path(f, &path));
+        // Pas de métadonnées sur un chemin réseau (l'appel pourrait bloquer l'interface).
+        let is_file = is_favorite
+            && !path.to_string_lossy().starts_with(r"\\")
+            && std::fs::metadata(&path).is_ok_and(|m| m.is_file());
+        if is_file {
+            self.open_file(path);
+        } else {
+            self.active_pane().navigate(path, true, Vec::new());
+        }
+    }
+
+    /// Ouvre un fichier avec son application par défaut (sur le thread Shell).
+    fn open_file(self: &Rc<Self>, path: PathBuf) {
+        let owner = self.hwnd.get();
+        let id = self.active_pane().id;
+        self.host_post_raw(move |_| {
+            if let Err(e) = fx_win::shell::open(&path, owner) {
+                let msg = format!("Impossible d'ouvrir « {} » : {}", path.display(), e.message());
+                post_pane(id, move |p| p.flash_status(msg));
+            }
+        });
+    }
+
+    fn home_open(self: &Rc<Self>, path: PathBuf, is_dir: bool) {
+        if is_dir {
+            self.active_pane().navigate(path, true, Vec::new());
+        } else {
+            self.open_file(path);
+        }
+    }
+
+    /// Épingle ou désépingle : même liste que les favoris, donc aussi dans le volet de gauche.
+    fn home_pin(self: &Rc<Self>, path: PathBuf, pin: bool) {
+        {
+            let mut favs = self.favorites.borrow_mut();
+            let known = favs.iter().any(|f| same_path(f, &path));
+            if pin && !known {
+                favs.push(path.clone());
+            } else if !pin {
+                favs.retain(|f| !same_path(f, &path));
+            }
+        }
+        self.save_favorites();
+        self.active_pane().sync_global();
+        self.rebuild_home_lines();
+        self.refresh_home();
+    }
+
+    /// La page d'accueil vient d'être affichée : lignes connues tout de suite, données à jour
+    /// ensuite.
+    pub(crate) fn on_home_shown(self: &Rc<Self>) {
+        self.rebuild_home_lines();
+        self.refresh_home();
+    }
+
+    /// Recalcule les données de l'accueil (icônes, récents) hors du thread d'interface.
+    pub(crate) fn refresh_home(self: &Rc<Self>) {
+        let seq = self.home_seq.get() + 1;
+        self.home_seq.set(seq);
+        let nav: Vec<(String, PathBuf)> = self
+            .nav_entries
+            .borrow()
+            .iter()
+            .filter(|e| !e.header && !crate::home::is_home(&e.path))
+            .map(|e| (e.label.clone(), e.path.clone()))
+            .collect();
+        let favorites = self.favorites.borrow().clone();
+        let px = self.icon_px.get() * 2;
+        let spawned = std::thread::Builder::new().name("fx-home".into()).spawn(move || {
+            let data = crate::home::collect(nav, favorites, px);
+            post(move |a| {
+                if a.home_seq.get() == seq {
+                    *a.home_data.borrow_mut() = data;
+                    a.rebuild_home_lines();
+                }
+            });
+        });
+        if let Err(e) = spawned {
+            tracing::error!("page d'accueil non chargée : {e}");
+        }
+    }
+
+    /// Modèle Slint de la page d'accueil : lignes de cartes selon la largeur, étoiles selon les
+    /// favoris.
+    pub(crate) fn rebuild_home_lines(&self) {
+        use crate::{HomeItem, HomeLine};
+        let favorites = self.favorites.borrow().clone();
+        let mut data = self.home_data.borrow().clone();
+        data.pinned = crate::home::pinned_entries(&data, &favorites);
+        let item = |e: &crate::home::Entry| {
+            let icon = e.icon.as_ref().map(|i| {
+                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &i.rgba, i.width, i.height,
+                );
+                slint::Image::from_rgba8(buf)
+            });
+            HomeItem {
+                name: e.name.clone().into(),
+                sub: e.sub.clone().into(),
+                path: e.path.display().to_string().into(),
+                is_dir: e.is_dir,
+                pinned: favorites.iter().any(|f| same_path(f, &e.path)),
+                has_icon: icon.is_some(),
+                icon: icon.unwrap_or_default(),
+                date: e.date.clone().into(),
+            }
+        };
+        let lines: Vec<HomeLine> = crate::home::lines(&data, self.home_columns.get())
+            .into_iter()
+            .map(|l| HomeLine {
+                kind: l.kind,
+                title: l.title.into(),
+                items: ModelRc::new(VecModel::from(l.items.iter().map(&item).collect::<Vec<_>>())),
+            })
+            .collect();
+        self.ui.set_home_lines(ModelRc::new(VecModel::from(lines)));
+    }
+
     fn add_favorite(self: &Rc<Self>) {
         let pane = self.active_pane();
         let folder = pane.model.folder();
         let sel = pane.model.selected();
+        // Un seul élément sélectionné (dossier ou fichier), sinon le dossier affiché.
         let target = match (&folder, sel.as_slice()) {
-            (Some(f), [e]) if f.entry(*e).is_some_and(|x| x.is_dir()) => Some(f.child_path(*e)),
+            (Some(f), [e]) if f.entry(*e).is_some() => Some(f.child_path(*e)),
             _ => pane.current_path(),
         };
         let Some(target) = target else { return };
@@ -1535,6 +1674,10 @@ impl App {
     }
 
     fn save_favorites(&self) {
+        // Les modes de mesure et l'auto-test ne touchent jamais aux données de l'utilisateur.
+        if self.bench.borrow().is_some() {
+            return;
+        }
         let Some(dir) = &self.data_dir else { return };
         let text: String = self
             .favorites
@@ -2510,6 +2653,71 @@ impl App {
                     self.theme_forced,
                     "apparence : l'auto-test ne modifie pas les réglages de l'utilisateur",
                 );
+                // Page d'accueil.
+                p.navigate(crate::home::home_path(), true, Vec::new());
+                next(800, dir);
+            }
+            38 => {
+                let rows = slint::Model::row_count(&self.ui.get_home_lines());
+                if self.self_test_retry(step, &dir, rows > 6) {
+                    return;
+                }
+                self.update_toolbar();
+                self.check(
+                    p.is_home() && p.current_path().is_none() && self.ui.get_home_0(),
+                    "accueil : page affichée à la place de la liste",
+                );
+                self.check(
+                    rows > 6 && !self.ui.get_can_create(),
+                    &format!(
+                        "accueil : {rows} lignes (accès rapide, épinglés, récents), création désactivée"
+                    ),
+                );
+                // Épingler la première carte : elle rejoint les favoris et le volet de gauche.
+                let lines = self.ui.get_home_lines();
+                let first = (0..slint::Model::row_count(&lines))
+                    .filter_map(|i| slint::Model::row_data(&lines, i))
+                    .find(|l| l.kind == 1)
+                    .and_then(|l| slint::Model::row_data(&l.items, 0));
+                let Some(card) = first else {
+                    self.check(false, "accueil : aucune carte d'accès rapide");
+                    slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
+                    return;
+                };
+                let path = PathBuf::from(card.path.as_str());
+                self.home_pin(path.clone(), true);
+                let pinned = self.favorites.borrow().iter().any(|f| same_path(f, &path));
+                let in_nav = slint::Model::iter(&self.ui.get_nav_items()).any(|n| {
+                    n.path.as_str() == card.path.as_str() && n.label.as_str() != card.name.as_str()
+                        || n.path.as_str() == card.path.as_str()
+                });
+                self.check(
+                    pinned && in_nav,
+                    "accueil : l'épinglage ajoute l'élément aux favoris et au volet de gauche",
+                );
+                self.home_pin(path.clone(), false);
+                self.check(
+                    !self.favorites.borrow().iter().any(|f| same_path(f, &path)),
+                    "accueil : le désépinglage le retire",
+                );
+                // Historique : précédent revient au dossier, suivant à l'accueil.
+                p.go_back();
+                next(900, dir);
+            }
+            39 => {
+                self.check(
+                    !p.is_home() && p.current_path().is_some(),
+                    "accueil : « précédent » revient au dossier précédent",
+                );
+                p.go_forward();
+                next(500, dir);
+            }
+            40 => {
+                self.check(p.is_home(), "accueil : « suivant » revient à l'accueil");
+                let _ = std::fs::write(dir.join("capture-accueil.flag"), b"");
+                next(1500, dir);
+            }
+            41 => {
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
             _ => {}

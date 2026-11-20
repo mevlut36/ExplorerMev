@@ -23,6 +23,7 @@ mod pidl;
 pub mod pipe;
 pub mod preview;
 pub mod process;
+pub mod recent;
 pub mod shell;
 pub mod shell_host;
 pub mod usn;

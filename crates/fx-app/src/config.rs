@@ -26,6 +26,9 @@ pub struct Config {
     /// Index de recherche construit depuis la MFT (assistant élevé, invite UAC à chaque
     /// session) plutôt que par parcours des dossiers.
     pub index_mft: bool,
+    /// Au lancement sans dossier : reprendre les onglets de la dernière session plutôt que la
+    /// page d'accueil.
+    pub restore_session: bool,
 }
 
 impl Default for Config {
@@ -39,6 +42,7 @@ impl Default for Config {
             log_level: "info".into(),
             icons_view: false,
             index_mft: false,
+            restore_session: false,
         }
     }
 }
@@ -73,9 +77,14 @@ view = "details"
 # première recherche de chaque session). Sans cela, l'index est construit en parcourant les
 # dossiers.
 index_mft = false
+
+# Au lancement sans dossier en argument : "home" (page d'accueil, défaut) ou "session" (reprendre
+# les onglets de la dernière session).
+startup = "home"
 "#;
 
-const KNOWN: [&str; 8] = [
+const KNOWN: [&str; 9] = [
+    "startup",
     "index_mft",
     "view",
     "renderer",
@@ -164,6 +173,11 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                 Some(b) => cfg.index_mft = b,
                 None => bad(key, "true ou false"),
             },
+            "startup" => match value.as_str() {
+                Some("home") => cfg.restore_session = false,
+                Some("session") => cfg.restore_session = true,
+                _ => bad(key, "\"home\" ou \"session\""),
+            },
             "view" => match value.as_str() {
                 Some("details") => cfg.icons_view = false,
                 Some("icons") => cfg.icons_view = true,
@@ -196,9 +210,14 @@ mod tests {
     fn valid_values_are_applied() {
         let (cfg, w) = parse(
             "renderer = \"gpu\"\nmica = false\nshow_hidden = true\nnetwork_timeout_secs = 3\n\
-             start_folder = 'D:\\Projets'\nlog_level = \"debug\"\nview = \"icons\"\n",
+             start_folder = 'D:\\Projets'\nlog_level = \"debug\"\nview = \"icons\"\nstartup = \"session\"\n",
         );
-        assert!(cfg.icons_view);
+        assert!(cfg.icons_view && cfg.restore_session);
+        assert!(!parse("startup = \"home\"\n").0.restore_session);
+        assert!(
+            !parse("startup = \"n'importe quoi\"\n").1.is_empty(),
+            "valeur invalide signalée"
+        );
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(cfg.renderer, "gpu");
         assert!(!cfg.mica && cfg.show_hidden);

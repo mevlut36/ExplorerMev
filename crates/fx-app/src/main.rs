@@ -381,11 +381,17 @@ fn main() -> ExitCode {
         .or(args.bench_scroll.clone())
         .or(args.path)
         .or(cfg.start_folder.clone())
+        // Sans dossier demandé ni configuré, la page d'accueil (les mesures gardent le profil).
+        .or_else(|| (!benching).then(fx_ui::home_path))
         .or_else(|| fx_win::shell::known_folder(fx_win::shell::KnownFolder::Profile))
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));
     // Chemin absolu et normalisé (barres obliques, `..`) : le Shell n'accepte que cette forme.
-    let start = std::path::absolute(&start).unwrap_or(start);
+    let start = if start == fx_ui::home_path() {
+        start
+    } else {
+        std::path::absolute(&start).unwrap_or(start)
+    };
     let bench = if args.bench_scroll.is_some() {
         Some(BenchMode::Scroll {
             maximized: args.maximized,
@@ -425,7 +431,8 @@ fn main() -> ExitCode {
             .unwrap_or(cfg.network_timeout),
         startup_warning: warnings.first().cloned(),
         // Sans dossier explicite, on reprend les onglets de la session précédente.
-        restore_session: !benching && explicit_path.is_none(),
+        // Reprise de session seulement si le réglage `startup = "session"` la demande.
+        restore_session: !benching && explicit_path.is_none() && cfg.restore_session,
         data_dir: std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("ExplorerMev")),
         // Les modes de mesure ont leur propre cache (reproductibilité, pas de mélange).
         index_dir: std::env::var_os("LOCALAPPDATA").map(|d| {
