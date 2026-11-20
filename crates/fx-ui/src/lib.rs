@@ -43,6 +43,8 @@ pub struct Options {
     pub mica: bool,
     /// Afficher les éléments cachés (réglage « Éléments masqués » de l'Explorateur).
     pub show_hidden: bool,
+    /// Nouveaux volets en vue icônes.
+    pub icons_view: bool,
     /// Délai au-delà duquel un dossier qui ne répond pas (réseau) est abandonné.
     pub network_timeout: std::time::Duration,
     /// Avertissement à afficher au démarrage (configuration illisible…).

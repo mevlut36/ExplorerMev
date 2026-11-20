@@ -21,6 +21,8 @@ pub struct Config {
     pub network_timeout: Duration,
     /// Niveau du journal : `error`, `warn`, `info`, `debug`, `trace`, `off`.
     pub log_level: String,
+    /// Affichage des nouveaux volets : vue icônes plutôt que détails.
+    pub icons_view: bool,
 }
 
 impl Default for Config {
@@ -32,6 +34,7 @@ impl Default for Config {
             show_hidden: false,
             network_timeout: Duration::from_secs(10),
             log_level: "info".into(),
+            icons_view: false,
         }
     }
 }
@@ -57,9 +60,13 @@ network_timeout_secs = 10
 
 # Niveau du journal (%LOCALAPPDATA%\WinDir\logs) : "error", "warn", "info", "debug", "trace", "off".
 log_level = "info"
+
+# Affichage des nouveaux volets : "details" (défaut) ou "icons" (Ctrl+Maj+V bascule).
+view = "details"
 "#;
 
-const KNOWN: [&str; 6] = [
+const KNOWN: [&str; 7] = [
+    "view",
     "renderer",
     "mica",
     "start_folder",
@@ -142,6 +149,11 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                 Some(l @ ("error" | "warn" | "info" | "debug" | "trace" | "off")) => cfg.log_level = l.into(),
                 _ => bad(key, "error, warn, info, debug, trace ou off"),
             },
+            "view" => match value.as_str() {
+                Some("details") => cfg.icons_view = false,
+                Some("icons") => cfg.icons_view = true,
+                _ => bad(key, "\"details\" ou \"icons\""),
+            },
             other => {
                 debug_assert!(!KNOWN.contains(&other));
                 unknown.push(other.to_string());
@@ -169,8 +181,9 @@ mod tests {
     fn valid_values_are_applied() {
         let (cfg, w) = parse(
             "renderer = \"gpu\"\nmica = false\nshow_hidden = true\nnetwork_timeout_secs = 3\n\
-             start_folder = 'D:\\Projets'\nlog_level = \"debug\"\n",
+             start_folder = 'D:\\Projets'\nlog_level = \"debug\"\nview = \"icons\"\n",
         );
+        assert!(cfg.icons_view);
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(cfg.renderer, "gpu");
         assert!(!cfg.mica && cfg.show_hidden);

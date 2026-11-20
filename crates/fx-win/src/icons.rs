@@ -19,8 +19,8 @@ use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBU
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromParsingName, SHFILEINFOW, SHGFI_SYSICONINDEX,
-    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_LARGE, SHIL_SMALL,
-    SIIGBF_ICONONLY,
+    SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO, SHIL_LARGE,
+    SHIL_SMALL, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 use windows::core::PCWSTR;
@@ -149,8 +149,10 @@ pub fn type_icon(file_name: &[u16], is_dir: bool, size: u32) -> Option<IconImage
         SHIL_SMALL
     } else if size <= 36 {
         SHIL_LARGE
-    } else {
+    } else if size <= 64 {
         SHIL_EXTRALARGE
+    } else {
+        SHIL_JUMBO
     };
     // SAFETY: `name` terminé par un nul ; `info` locale de taille transmise ; l'image list
     // système est un objet COM possédé ; l'HICON renvoyé est détruit par `hicon_to_image`.
@@ -167,8 +169,28 @@ pub fn type_icon(file_name: &[u16], is_dir: bool, size: u32) -> Option<IconImage
         }
         let list: IImageList = SHGetImageList(list_id as i32).ok()?;
         let icon = list.GetIcon(info.iIcon, ILD_TRANSPARENT.0).ok()?;
-        hicon_to_image(icon)
+        let img = hicon_to_image(icon)?;
+        // Icône sans version 256 px : la liste « jumbo » la dessine en petit dans le coin
+        // supérieur gauche. On prend alors la version 48 px, que l'interface agrandit.
+        if list_id == SHIL_JUMBO && content_extent(&img) <= 64 {
+            let list: IImageList = SHGetImageList(SHIL_EXTRALARGE as i32).ok()?;
+            let icon = list.GetIcon(info.iIcon, ILD_TRANSPARENT.0).ok()?;
+            return hicon_to_image(icon);
+        }
+        Some(img)
     }
+}
+
+/// Plus grande coordonnée (x ou y) + 1 d'un pixel non transparent.
+fn content_extent(img: &IconImage) -> u32 {
+    let mut extent = 0;
+    for (i, p) in img.rgba.as_chunks::<4>().0.iter().enumerate() {
+        if p[3] != 0 {
+            let (x, y) = (i as u32 % img.width.max(1), i as u32 / img.width.max(1));
+            extent = extent.max(x + 1).max(y + 1);
+        }
+    }
+    extent
 }
 
 /// Icône propre à l'élément `path` (lit le fichier pour `.exe`, `.ico`…).

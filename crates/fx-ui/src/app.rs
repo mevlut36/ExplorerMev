@@ -113,6 +113,7 @@ enum Cmd {
     CopyToOther,
     MoveToOther,
     TogglePreview,
+    ToggleView,
     ToggleHidden,
     Refresh,
     NewFolder,
@@ -141,6 +142,7 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
         "Maj+F5 (double volet)",
     ),
     (Cmd::TogglePreview, "Volet d'aperçu", "Alt+P"),
+    (Cmd::ToggleView, "Affichage : détails ou icônes", "Ctrl+Maj+V"),
     (
         Cmd::ToggleHidden,
         "Afficher ou masquer les éléments cachés",
@@ -163,6 +165,7 @@ pub(crate) struct App {
     pub ui: MainWindow,
     pub hwnd: Cell<Option<isize>>,
     pub show_hidden: Cell<bool>,
+    icons_view: bool,
     pub network_timeout: Duration,
     pub drive_labels: RefCell<HashMap<PathBuf, String>>,
     mica: bool,
@@ -223,6 +226,7 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         ui: ui.clone_strong(),
         hwnd: Cell::new(None),
         show_hidden: Cell::new(options.show_hidden),
+        icons_view: options.icons_view,
         network_timeout: options.network_timeout,
         drive_labels: RefCell::default(),
         mica: options.mica,
@@ -356,6 +360,17 @@ fn wire_callbacks(ui: &MainWindow) {
             p.marquee_changed(ra, rb, ctrl);
         }
     });
+    ui.on_marquee_grid(|slot, la, lb, ca, cb| {
+        if let Some(p) = pane_at(slot) {
+            p.marquee_grid(la, lb, ca, cb);
+        }
+    });
+    ui.on_columns_changed(|slot, cols| {
+        if let Some(p) = pane_at(slot) {
+            p.model.set_columns(cols.max(1) as usize);
+        }
+    });
+    ui.on_toggle_view(|| with_app(|a| a.run_cmd(Cmd::ToggleView)));
     ui.on_marquee_ended(|slot| {
         if let Some(p) = pane_at(slot) {
             p.st.borrow_mut().marquee_base = None;
@@ -458,7 +473,11 @@ impl App {
         let loader = Arc::new(Loader::new(source, Arc::new(WinCollator)));
         let model = Rc::new(FolderModel::new(self.icons.clone()));
         model.set_icon_px(self.icon_px.get());
-        Rc::new(Pane::new(id, loader, model))
+        let pane = Rc::new(Pane::new(id, loader, model));
+        if self.icons_view {
+            pane.set_grid(true);
+        }
+        pane
     }
 
     fn all_panes(&self) -> Vec<Rc<Pane>> {
@@ -916,6 +935,7 @@ impl App {
                 'r' => Some(Cmd::Refresh),
                 'd' => Some(Cmd::AddFavorite),
                 'c' if shift => Some(Cmd::CopyPath),
+                'v' if shift => Some(Cmd::ToggleView),
                 's' if shift => Some(Cmd::FolderSize),
                 '`' if shift => Some(Cmd::OpenTerminal),
                 _ => None,
@@ -987,6 +1007,7 @@ impl App {
             Cmd::SwitchPane => self.switch_pane(),
             Cmd::CopyToOther | Cmd::MoveToOther => self.transfer_to_other(cmd == Cmd::MoveToOther),
             Cmd::TogglePreview => self.toggle_preview(),
+            Cmd::ToggleView => pane.toggle_view(),
             Cmd::ToggleHidden => self.toggle_hidden(),
             Cmd::Refresh => pane.refresh(),
             Cmd::NewFolder => pane.new_folder(),
@@ -1374,6 +1395,7 @@ impl App {
             run.frames.push(Instant::now());
         }
         self.follow_native_preview();
+        self.track_visible_lines();
         if self.frames.get() == 1 {
             let at = fx_win::process::ms_since_process_start();
             slint::Timer::single_shot(Duration::ZERO, move || {
@@ -1386,6 +1408,27 @@ impl App {
             // Le timer à délai nul s'exécute après le rendu de cette image.
             let id = pane.id;
             slint::Timer::single_shot(Duration::ZERO, move || with_pane(id, |p| p.painted(wait)));
+        }
+    }
+
+    /// Relève les lignes de grille visibles de chaque volet affiché en vue icônes.
+    fn track_visible_lines(&self) {
+        for slot in 0..2 {
+            let Some(p) = self.pane_in_slot(slot) else {
+                continue;
+            };
+            if !p.model.is_grid() {
+                continue;
+            }
+            let (y, h) = if slot == 1 {
+                (self.ui.get_scroll_y_1(), self.ui.get_view_height_1())
+            } else {
+                (self.ui.get_scroll_y_0(), self.ui.get_view_height_0())
+            };
+            let line_h = crate::pane::TILE_HEIGHT;
+            let first = (y.max(0.0) / line_h).floor() as usize;
+            let end = ((y.max(0.0) + h.max(0.0)) / line_h).ceil() as usize + 1;
+            p.model.set_visible_lines(first, end);
         }
     }
 
@@ -1769,6 +1812,46 @@ impl App {
                 // Masquer le volet ferme le prévisualiseur natif.
                 self.toggle_preview();
                 self.check(!self.preview_native.get(), "volet masqué : prévisualiseur fermé");
+                // Vue icônes (Ctrl+Maj+V) : vignettes du Shell.
+                self.on_key(-1, "v", true, true, false);
+                next(2000, dir);
+            }
+            22 => {
+                let cols = p.model.columns();
+                let grid = p.model.is_grid() && p.ui_snapshot().view_mode == 1;
+                self.check(
+                    grid && cols > 1,
+                    &format!("Ctrl+Maj+V : vue icônes ({cols} colonnes)"),
+                );
+                let row_of = |name: &str| {
+                    let f = p.model.folder()?;
+                    p.model.visible().iter().position(|&e| f.display_name(e) == name)
+                };
+                let thumb = row_of("image.bmp")
+                    .and_then(|r| slint::Model::row_data(&*p.model, r))
+                    .map(|row| (row.has_icon, row.icon.size()));
+                self.check(
+                    thumb.is_some_and(|(has, size)| has && size.width > 32),
+                    &format!("vignette de l'image en vue icônes ({thumb:?})"),
+                );
+                // Flèches : droite = élément suivant, bas = ligne de tuiles suivante.
+                p.model.update_selection(|s, v| s.move_to(v, 0, false, false));
+                p.on_key(&char::from(Key::RightArrow).to_string(), false, false, false);
+                let after_right = p.model.selection().focus_row(&p.model.visible());
+                p.on_key(&char::from(Key::DownArrow).to_string(), false, false, false);
+                let after_down = p.model.selection().focus_row(&p.model.visible());
+                let expected_down = if 1 + cols < p.model.len() { 1 + cols } else { 1 };
+                self.check(
+                    after_right == Some(1) && after_down == Some(expected_down),
+                    &format!("flèches en vue icônes (droite → {after_right:?}, bas → {after_down:?})"),
+                );
+                p.update_status();
+                let _ = std::fs::write(dir.join("capture-grille.flag"), b"");
+                next(1200, dir);
+            }
+            23 => {
+                self.on_key(-1, "v", true, true, false);
+                self.check(!p.model.is_grid(), "retour à la vue détails");
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
             _ => {}
@@ -1780,7 +1863,19 @@ impl App {
         driver.start(slint::TimerMode::Repeated, Duration::from_millis(2), || {
             with_app(|a| {
                 let p = a.active_pane();
-                let max = p.max_scroll() as f64;
+                // Hauteur lue une seule fois : la lire à chaque tick forcerait Slint à mettre
+                // la liste à jour entre deux images (plusieurs sauts instanciés par image).
+                let cached = a.scroll.borrow().as_ref().and_then(|r| r.max);
+                let max = match cached {
+                    Some(m) => m,
+                    None => {
+                        let m = p.max_scroll() as f64;
+                        if let Some(r) = a.scroll.borrow_mut().as_mut() {
+                            r.max = Some(m);
+                        }
+                        m
+                    }
+                };
                 let pos = a.scroll.borrow_mut().as_mut().and_then(|r| r.position(max));
                 match pos {
                     Some(y) => p.set_scroll(y as f32),
@@ -1811,6 +1906,7 @@ impl App {
             phases: Vec::new(),
             frames: Vec::new(),
             rng: 0x2545_F491_4F6C_DD1D,
+            max: None,
             _driver: driver,
         });
     }

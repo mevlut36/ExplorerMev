@@ -247,3 +247,21 @@ reproduire.
 - Saisie au clavier : deux touches à moins d'une seconde d'intervalle forment une seule
   recherche (« a » puis « i » cherche « ai »), comme dans l'Explorateur ; l'auto-test réinitialise
   la saisie entre deux sélections.
+- **Icônes 256 px** : `SHGetImageList(SHIL_JUMBO)` dessine une icône sans version 256 px en
+  petit dans le coin supérieur gauche d'un carré de 256 px. On mesure l'étendue des pixels non
+  transparents ; si elle tient dans 64 px, on reprend la liste `SHIL_EXTRALARGE` (48 px).
+- **Vue icônes et Slint** (`ListView` de lignes de tuiles, chaque ligne portant un modèle de
+  tuiles) :
+  - remplacer une ligne (`row_changed`) recrée son modèle interne, donc réinstancie toutes ses
+    tuiles. Une icône livrée ou un changement de sélection met donc à jour la tuile en place
+    (`VecModel::set_row_data` sur le modèle de la ligne, gardé en cache) ;
+  - notifier le modèle pendant que Slint lit `row_data` provoque une panique
+    (`RefCell already borrowed` dans `repeater.rs`) : aucune notification depuis `row_data` ;
+  - une livraison d'icônes ne doit rafraîchir que les éléments qui attendaient ces icônes
+    (attente indexée par clé) ; tout rafraîchir à chaque lot coûtait ~2 400 mises à jour par
+    image en plein écran ;
+  - ne demander d'icône que pour les lignes visibles : sinon les requêtes au-delà de la file
+    du thread d'icônes sont annulées, redemandées, annulées… (CPU à 100 %, plus de rendu).
+- Les icônes sont réduites à leur taille d'affichage dans le thread d'icônes : le moteur
+  logiciel de Slint redimensionnerait sinon l'image à chaque image (sans effet mesurable ici,
+  mais moins de mémoire : 96 px au lieu de 256 px).

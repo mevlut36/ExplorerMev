@@ -19,6 +19,12 @@ export struct Row {
     icon: image,
 }
 
+// Ligne de la vue icônes : `items` sont les éléments `first`, `first + 1`…
+export struct GridLine {
+    first: int,
+    items: [Row],
+}
+
 export struct NavItem {
     label: string,
     glyph: string,
@@ -46,6 +52,10 @@ export global Theme {
     out property <brush> popup: dark ? #2c2c2c : #f9f9f9;
     out property <brush> folder: #e8b84a;
     out property <length> row-height: 32px;
+    // Vue icônes : tuile et icône (96 px, comme les « grandes icônes » de l'Explorateur).
+    out property <length> tile-width: 112px;
+    out property <length> tile-height: 140px;
+    out property <length> tile-icon: 96px;
     out property <string> icons: "Segoe Fluent Icons";
 }
 
@@ -294,6 +304,136 @@ component FileRow inherits Rectangle {
     }
 }
 
+// Tuile de la vue icônes : vignette ou icône, nom sur deux lignes.
+component Tile inherits Rectangle {
+    in property <Row> data;
+    in property <bool> list-has-focus;
+    in property <bool> drop-target;
+    in property <bool> renaming;
+    in property <string> rename-text;
+    in property <int> rename-stem;
+    // kind : 0 appui gauche, 1 relâchement gauche, 2 double-clic, 3 relâchement droit
+    callback pointer(kind: int, ctrl: bool, shift: bool);
+    callback drag-moved(dx: length, dy: length);
+    callback rename-commit(text: string);
+    callback rename-cancel();
+    width: Theme.tile-width;
+    height: Theme.tile-height;
+    accessible-role: list-item;
+    accessible-label: data.name;
+    accessible-item-selected: data.selected;
+
+    ta := TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.pointer(0, e.modifiers.control, e.modifiers.shift);
+            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
+                root.pointer(1, e.modifiers.control, e.modifiers.shift);
+            } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                root.pointer(3, e.modifiers.control, e.modifiers.shift);
+            }
+        }
+        double-clicked => { root.pointer(2, false, false); }
+        moved => {
+            if self.pressed {
+                root.drag-moved(self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y);
+            }
+        }
+    }
+    Rectangle {
+        x: 3px;
+        y: 3px;
+        width: parent.width - 6px;
+        height: parent.height - 6px;
+        border-radius: 4px;
+        background: root.drop-target ? Palette.accent-background.transparentize(0.6)
+            : root.data.selected ? (ta.has-hover ? Theme.selected-hover : Theme.selected)
+            : ta.has-hover ? Theme.hover : transparent;
+        border-width: root.data.focused && root.list-has-focus ? 1px : 0px;
+        border-color: Theme.text-disabled;
+    }
+    Rectangle {
+        opacity: root.data.dimmed ? 0.55 : 1.0;
+        Image {
+            visible: root.data.has-icon;
+            x: (parent.width - Theme.tile-icon) / 2;
+            y: 8px;
+            width: Theme.tile-icon;
+            height: Theme.tile-icon;
+            source: root.data.icon;
+            image-fit: contain;
+        }
+        Text {
+            visible: !root.data.has-icon;
+            y: 8px;
+            width: parent.width;
+            height: Theme.tile-icon;
+            text: root.data.is-dir ? "\u{E8B7}" : "\u{E8A5}";
+            font-family: Theme.icons;
+            font-size: 56px;
+            color: root.data.is-dir ? Theme.folder : Theme.text-secondary;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            visible: !root.renaming;
+            x: 6px;
+            y: Theme.tile-icon + 12px;
+            width: parent.width - 12px;
+            height: parent.height - Theme.tile-icon - 16px;
+            text: root.data.name;
+            font-size: 12px;
+            wrap: word-wrap;
+            overflow: elide;
+            horizontal-alignment: center;
+            vertical-alignment: top;
+        }
+    }
+    Text {
+        visible: root.data.cloud > 0;
+        x: 10px;
+        y: Theme.tile-icon - 8px;
+        text: root.data.cloud == 1 ? "\u{E753}" : root.data.cloud == 2 ? "\u{E930}" : "\u{EC61}";
+        font-family: Theme.icons;
+        font-size: 14px;
+        color: root.data.cloud == 1 ? #4cc2ff : #6ccb5f;
+        accessible-role: text;
+        accessible-label: root.data.cloud == 1 ? "Disponible en ligne seulement"
+            : root.data.cloud == 2 ? "Disponible sur cet appareil" : "Toujours disponible sur cet appareil";
+    }
+    if root.renaming: LineEdit {
+        x: 2px;
+        y: Theme.tile-icon + 8px;
+        width: parent.width - 4px;
+        height: 28px;
+        font-size: 12px;
+        text: root.rename-text;
+        property <bool> done;
+        init => {
+            self.focus();
+            self.set-selection-offsets(0, root.rename-stem);
+        }
+        accepted(t) => {
+            self.done = true;
+            root.rename-commit(t);
+        }
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                self.done = true;
+                root.rename-cancel();
+                return accept;
+            }
+            reject
+        }
+        changed has-focus => {
+            if !self.has-focus && !self.done {
+                self.done = true;
+                root.rename-commit(self.text);
+            }
+        }
+    }
+}
+
 component NavPane inherits Rectangle {
     in property <[NavItem]> items;
     callback activated(path: string);
@@ -369,9 +509,18 @@ component FolderPane inherits Rectangle {
     in property <string> rename-text;
     in property <int> rename-stem;
     in property <int> drop-row: -1;
-    out property <int> page-rows: max(1, floor(file-list.visible-height / Theme.row-height) - 1);
-    out property <length> max-scroll: max(0px, file-list.content-height - file-list.visible-height);
-    out property <length> scroll-y: -file-list.content-y;
+    // 0 détails, 1 icônes
+    in property <int> view-mode;
+    in property <[GridLine]> grid-lines;
+    property <bool> grid: root.view-mode == 1;
+    property <length> line-height: grid ? Theme.tile-height : Theme.row-height;
+    property <length> content-y: grid ? grid-list.content-y : file-list.content-y;
+    out property <length> visible-height: grid ? grid-list.visible-height : file-list.visible-height;
+    out property <int> grid-columns: max(1, floor((list-area.width - 8px) / Theme.tile-width));
+    // Lignes par page (en vue icônes : lignes de tuiles).
+    out property <int> page-rows: max(1, floor(root.visible-height / root.line-height) - 1);
+    out property <length> max-scroll: max(0px, (grid ? grid-list.content-height : file-list.content-height) - root.visible-height);
+    out property <length> scroll-y: -root.content-y;
 
     callback activated();
     callback sort-by(int);
@@ -380,6 +529,8 @@ component FolderPane inherits Rectangle {
     callback drag-out(row: int);
     callback marquee-changed(row-a: int, row-b: int, ctrl: bool);
     callback marquee-ended();
+    callback marquee-grid(line-a: int, line-b: int, col-a: int, col-b: int);
+    callback columns-changed(int);
     callback rename-commit(string);
     callback rename-cancel();
     callback key(text: string, ctrl: bool, shift: bool, alt: bool) -> bool;
@@ -406,18 +557,27 @@ component FolderPane inherits Rectangle {
     min-width: 160px;
     clip: true;
 
+    changed grid-columns => {
+        root.columns-changed(self.grid-columns);
+    }
+
     public function scroll-to-row(row: int) {
         if row < 0 {
             return;
         }
-        if row * Theme.row-height < -file-list.content-y {
-            file-list.content-y = -row * Theme.row-height;
-        } else if (row + 1) * Theme.row-height > -file-list.content-y + file-list.visible-height {
-            file-list.content-y = -((row + 1) * Theme.row-height - file-list.visible-height);
-        }
+        let line = root.grid ? floor(row / root.grid-columns) : row;
+        let top = -root.content-y;
+        let target = line * root.line-height < top ? line * root.line-height
+            : (line + 1) * root.line-height > top + root.visible-height ? (line + 1) * root.line-height - root.visible-height
+            : top;
+        root.set-scroll(target);
     }
     public function set-scroll(y: length) {
-        file-list.content-y = -y;
+        if root.grid {
+            grid-list.content-y = -y;
+        } else {
+            file-list.content-y = -y;
+        }
     }
     public function focus-list() {
         list-focus.focus();
@@ -431,14 +591,23 @@ component FolderPane inherits Rectangle {
         if !root.contains(x, y) {
             return -1;
         }
-        let r = floor((y - list-area.absolute-position.y - file-list.content-y) / Theme.row-height);
+        let line = floor((y - list-area.absolute-position.y - root.content-y) / root.line-height);
+        if !root.grid {
+            return line < root.rows.length ? line : -1;
+        }
+        let col = floor((x - list-area.absolute-position.x - 4px) / Theme.tile-width);
+        if col < 0 || col >= root.grid-columns {
+            return -1;
+        }
+        let r = line * root.grid-columns + col;
         return r < root.rows.length ? r : -1;
     }
     public function row-anchor-x() -> length {
         list-area.absolute-position.x + 48px
     }
     public function row-anchor-y(row: int) -> length {
-        list-area.absolute-position.y + file-list.content-y + (row + 1) * Theme.row-height
+        let line = root.grid ? floor(row / root.grid-columns) : row;
+        list-area.absolute-position.y + root.content-y + (line + 1) * root.line-height
     }
 
     function marquee-update(cx: length, cy: length) {
@@ -447,7 +616,13 @@ component FolderPane inherits Rectangle {
         if !root.marquee-active && (abs(root.mq-x1 - root.mq-x0) > 4px || abs(root.mq-y1 - root.mq-y0) > 4px) {
             root.marquee-active = true;
         }
-        if root.marquee-active {
+        if root.marquee-active && root.grid {
+            root.marquee-grid(
+                floor(max(0px, min(root.mq-y0, root.mq-y1)) / Theme.tile-height),
+                floor(max(root.mq-y0, root.mq-y1) / Theme.tile-height),
+                max(0, floor((min(root.mq-x0, root.mq-x1) - 4px) / Theme.tile-width)),
+                min(root.grid-columns - 1, floor((max(root.mq-x0, root.mq-x1) - 4px) / Theme.tile-width)));
+        } else if root.marquee-active {
             root.marquee-changed(
                 floor(min(root.mq-y0, root.mq-y1) / Theme.row-height),
                 floor(max(root.mq-y0, root.mq-y1) / Theme.row-height),
@@ -467,7 +642,7 @@ component FolderPane inherits Rectangle {
 
     VerticalLayout {
         padding-top: 4px;
-        Rectangle {
+        if !root.grid: Rectangle {
             height: 32px;
             HorizontalLayout {
                 padding-left: 4px;
@@ -529,7 +704,7 @@ component FolderPane inherits Rectangle {
                             list-focus.focus();
                             root.activated();
                             root.mq-x0 = self.mouse-x;
-                            root.mq-y0 = self.mouse-y - file-list.content-y;
+                            root.mq-y0 = self.mouse-y - root.content-y;
                             root.marquee-active = false;
                             root.background-pointer(0, e.modifiers.control, e.modifiers.shift);
                         } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
@@ -544,12 +719,13 @@ component FolderPane inherits Rectangle {
                     }
                     moved => {
                         if self.pressed {
-                            root.marquee-update(self.mouse-x, self.mouse-y - file-list.content-y);
+                            root.marquee-update(self.mouse-x, self.mouse-y - root.content-y);
                         }
                     }
                 }
                 file-list := ListView {
-                    for row[i] in root.rows: FileRow {
+                    visible: !root.grid;
+                    for row[i] in (root.grid ? [] : root.rows): FileRow {
                         data: row;
                         index: i;
                         list-has-focus: list-focus.has-focus;
@@ -595,9 +771,45 @@ component FolderPane inherits Rectangle {
                         rename-cancel => { root.rename-cancel(); }
                     }
                 }
+                grid-list := ListView {
+                    visible: root.grid;
+                    for line in root.grid-lines: Rectangle {
+                        height: Theme.tile-height;
+                        for item[k] in line.items: Tile {
+                            x: 4px + k * Theme.tile-width;
+                            y: 0px;
+                            data: item;
+                            list-has-focus: list-focus.has-focus;
+                            drop-target: line.first + k == root.drop-row;
+                            renaming: line.first + k == root.rename-row;
+                            rename-text: root.rename-text;
+                            rename-stem: root.rename-stem;
+                            pointer(kind, ctrl, shift) => {
+                                if kind == 0 {
+                                    list-focus.focus();
+                                    root.activated();
+                                    root.drag-started = false;
+                                    root.marquee-active = false;
+                                }
+                                if kind == 3 {
+                                    root.activated();
+                                }
+                                root.row-pointer(line.first + k, kind, ctrl, shift, true);
+                            }
+                            drag-moved(dx, dy) => {
+                                if !root.drag-started && (abs(dx) > 6px || abs(dy) > 6px) {
+                                    root.drag-started = true;
+                                    root.drag-out(line.first + k);
+                                }
+                            }
+                            rename-commit(t) => { root.rename-commit(t); }
+                            rename-cancel => { root.rename-cancel(); }
+                        }
+                    }
+                }
                 if root.marquee-active: Rectangle {
                     x: min(root.mq-x0, root.mq-x1);
-                    y: min(root.mq-y0, root.mq-y1) + file-list.content-y;
+                    y: min(root.mq-y0, root.mq-y1) + root.content-y;
                     width: abs(root.mq-x1 - root.mq-x0);
                     height: abs(root.mq-y1 - root.mq-y0);
                     background: Palette.accent-background.transparentize(0.75);
@@ -753,12 +965,20 @@ export component MainWindow inherits Window {
     in property <int> rename-stem-1;
     in property <int> drop-row-0: -1;
     in property <int> drop-row-1: -1;
+    in property <int> view-mode-0;
+    in property <int> view-mode-1;
+    in property <[GridLine]> grid-lines-0;
+    in property <[GridLine]> grid-lines-1;
+    out property <int> grid-columns-0: p0.grid-columns;
+    out property <int> grid-columns-1: p1.grid-columns;
     out property <int> page-rows-0: p0.page-rows;
     out property <int> page-rows-1: p1.page-rows;
     out property <length> max-scroll-0: p0.max-scroll;
     out property <length> max-scroll-1: p1.max-scroll;
     out property <length> scroll-y-0: p0.scroll-y;
     out property <length> scroll-y-1: p1.scroll-y;
+    out property <length> view-height-0: p0.visible-height;
+    out property <length> view-height-1: p1.visible-height;
 
     // --- Volet d'aperçu ---
     in property <bool> preview-visible;
@@ -800,6 +1020,9 @@ export component MainWindow inherits Window {
     callback drag-out(pane: int, row: int);
     callback marquee-changed(pane: int, row-a: int, row-b: int, ctrl: bool);
     callback marquee-ended(pane: int);
+    callback marquee-grid(pane: int, line-a: int, line-b: int, col-a: int, col-b: int);
+    callback columns-changed(pane: int, columns: int);
+    callback toggle-view();
     callback rename-commit(pane: int, text: string);
     callback rename-cancel(pane: int);
     // pane = -1 : touche reçue hors des listes.
@@ -1016,6 +1239,11 @@ export component MainWindow inherits Window {
                     }
                 }
                 ToolButton {
+                    glyph: (root.active-pane == 1 ? root.view-mode-1 : root.view-mode-0) == 1 ? "\u{E8FD}" : "\u{E8A9}";
+                    tooltip: "Affichage : détails ou icônes (Ctrl+Maj+V)";
+                    clicked => { root.toggle-view(); }
+                }
+                ToolButton {
                     glyph: "\u{E89F}";
                     tooltip: "Double volet (F6)";
                     clicked => { root.toggle-dual(); }
@@ -1048,6 +1276,10 @@ export component MainWindow inherits Window {
                     rename-text: root.rename-text-0;
                     rename-stem: root.rename-stem-0;
                     drop-row: root.drop-row-0;
+                    view-mode: root.view-mode-0;
+                    grid-lines: root.grid-lines-0;
+                    marquee-grid(la, lb, ca, cb) => { root.marquee-grid(0, la, lb, ca, cb); }
+                    columns-changed(c) => { root.columns-changed(0, c); }
                     activated => { root.pane-activated(0); }
                     sort-by(c) => { root.sort-by(0, c); }
                     row-pointer(r, k, c, s, n) => { root.row-pointer(0, r, k, c, s, n); }
@@ -1076,6 +1308,10 @@ export component MainWindow inherits Window {
                     rename-text: root.rename-text-1;
                     rename-stem: root.rename-stem-1;
                     drop-row: root.drop-row-1;
+                    view-mode: root.view-mode-1;
+                    grid-lines: root.grid-lines-1;
+                    marquee-grid(la, lb, ca, cb) => { root.marquee-grid(1, la, lb, ca, cb); }
+                    columns-changed(c) => { root.columns-changed(1, c); }
                     activated => { root.pane-activated(1); }
                     sort-by(c) => { root.sort-by(1, c); }
                     row-pointer(r, k, c, s, n) => { root.row-pointer(1, r, k, c, s, n); }

@@ -29,8 +29,11 @@ use slint::{ComponentHandle, LogicalPosition, ModelRc, SharedString, VecModel};
 
 use crate::Crumb;
 use crate::app::{with_app, with_ui};
-use crate::model::FolderModel;
+use crate::model::{FolderModel, GridModel};
 use crate::ops::{self, Job};
+
+/// Hauteur d'une ligne de tuiles (`Theme.tile-height` dans app.slint), en pixels logiques.
+pub(crate) const TILE_HEIGHT: f32 = 140.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct NavTiming {
@@ -132,6 +135,8 @@ pub(crate) struct UiState {
     pub rename_text: SharedString,
     pub rename_stem: i32,
     pub drop_row: i32,
+    /// 0 détails, 1 icônes.
+    pub view_mode: i32,
 }
 
 impl Default for UiState {
@@ -147,6 +152,7 @@ impl Default for UiState {
             rename_text: SharedString::new(),
             rename_stem: 0,
             drop_row: -1,
+            view_mode: 0,
         }
     }
 }
@@ -157,6 +163,8 @@ pub(crate) struct Pane {
     pub slot: Cell<Option<usize>>,
     pub loader: Arc<Loader>,
     pub model: Rc<FolderModel>,
+    /// Lignes de la vue icônes, construites sur `model`.
+    pub grid_model: Rc<GridModel>,
     pub history: RefCell<History>,
     pub generation: Cell<u64>,
     pub view_seq: Cell<u64>,
@@ -176,6 +184,7 @@ impl Pane {
             id,
             slot: Cell::new(None),
             loader,
+            grid_model: Rc::new(GridModel(model.clone())),
             model,
             history: RefCell::default(),
             generation: Cell::new(0),
@@ -244,6 +253,7 @@ impl Pane {
                 ui.set_rename_stem_1(s.rename_stem);
                 ui.set_rename_row_1(s.rename_row);
                 ui.set_drop_row_1(s.drop_row);
+                ui.set_view_mode_1(s.view_mode);
             } else {
                 ui.set_status_0(s.status);
                 ui.set_error_text_0(s.error);
@@ -255,6 +265,7 @@ impl Pane {
                 ui.set_rename_stem_0(s.rename_stem);
                 ui.set_rename_row_0(s.rename_row);
                 ui.set_drop_row_0(s.drop_row);
+                ui.set_view_mode_0(s.view_mode);
             }
         });
     }
@@ -345,13 +356,21 @@ impl Pane {
     pub(crate) fn bind(self: &Rc<Self>, slot: usize) {
         self.slot.set(Some(slot));
         let model = slint::ModelRc::from(self.model.clone());
-        with_ui(|ui| {
+        let grid = slint::ModelRc::from(self.grid_model.clone());
+        let cols = with_ui(|ui| {
             if slot == 1 {
                 ui.set_rows_1(model);
+                ui.set_grid_lines_1(grid);
+                ui.get_grid_columns_1()
             } else {
                 ui.set_rows_0(model);
+                ui.set_grid_lines_0(grid);
+                ui.get_grid_columns_0()
             }
         });
+        if let Some(cols) = cols {
+            self.model.set_columns(cols.max(1) as usize);
+        }
         self.push_ui();
         // Le défilement est restauré après la mise en page des lignes.
         let id = self.id;
@@ -962,6 +981,47 @@ impl Pane {
         }
     }
 
+    /// Rectangle de sélection en vue icônes : lignes `la..=lb`, colonnes `ca..=cb`.
+    pub(crate) fn marquee_grid(self: &Rc<Self>, la: i32, lb: i32, ca: i32, cb: i32) {
+        let base = {
+            let mut st = self.st.borrow_mut();
+            st.press_deferred = None;
+            st.marquee_base.clone()
+        };
+        let cols = self.model.columns();
+        let len = self.model.len();
+        let (la, lb) = (la.max(0) as usize, lb.max(0) as usize);
+        let (ca, cb) = (ca.max(0) as usize, (cb.max(0) as usize).min(cols - 1));
+        let rows: Vec<usize> = (la..=lb)
+            .flat_map(|l| (ca..=cb).map(move |c| l * cols + c))
+            .take_while(|&r| r < len)
+            .collect();
+        self.model
+            .update_selection(|s, v| s.select_rows(v, &rows, base.as_ref()));
+        self.update_status();
+    }
+
+    pub(crate) fn set_grid(&self, grid: bool) {
+        self.model.set_grid(grid);
+        self.ui_with(|u| u.view_mode = i32::from(grid));
+    }
+
+    /// Bascule entre la vue détails et la vue icônes, en gardant l'élément courant visible.
+    pub(crate) fn toggle_view(self: &Rc<Self>) {
+        let grid = !self.model.is_grid();
+        self.set_grid(grid);
+        let focus = self.model.selection().focus_row(&self.model.visible());
+        let id = self.id;
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            with_pane(id, |p| {
+                p.set_scroll(0.0);
+                if let Some(r) = focus {
+                    p.ui_scroll_to_row(r as i32);
+                }
+            })
+        });
+    }
+
     pub(crate) fn marquee_changed(self: &Rc<Self>, a: i32, b: i32, _ctrl: bool) {
         let base = {
             let mut st = self.st.borrow_mut();
@@ -1148,11 +1208,21 @@ impl Pane {
         let is = |k: Key| c == char::from(k);
         let len = self.model.len();
         let cur = self.model.selection().focus_row(&self.model.visible());
-        let page = self.ui_page_rows().max(1) as usize;
+        // En vue icônes : haut/bas changent de ligne de tuiles, gauche/droite d'élément.
+        let step = if self.model.is_grid() {
+            self.model.columns()
+        } else {
+            1
+        };
+        let page = self.ui_page_rows().max(1) as usize * step;
         let last = len.saturating_sub(1);
         let target = if is(Key::DownArrow) {
-            cur.map_or(0, |r| (r + 1).min(last))
+            cur.map_or(0, |r| if r + step <= last { r + step } else { r })
         } else if is(Key::UpArrow) {
+            cur.map_or(0, |r| r.checked_sub(step).unwrap_or(r))
+        } else if step > 1 && is(Key::RightArrow) {
+            cur.map_or(0, |r| (r + 1).min(last))
+        } else if step > 1 && is(Key::LeftArrow) {
             cur.map_or(0, |r| r.saturating_sub(1))
         } else if is(Key::PageDown) {
             cur.map_or(0, |r| (r + page).min(last))

@@ -26,6 +26,7 @@ Options :
   --bench-startup             mesure le démarrage, affiche les durées et quitte
   --bench-open <dossier>      mesure l'ouverture de <dossier> (cache chaud) et quitte
   --bench-scroll <dossier>    mesure le défilement dans <dossier> et quitte (--maximized : plein écran)
+  --icons                     ouvre les volets en vue icônes (réglage « view » de config.toml)
   --self-test <dossier vide>  scénario d'auto-test dans ce dossier (créé et modifié !), puis quitte
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
   --out <fichier>             écrit aussi le rapport de mesure dans <fichier>
@@ -45,6 +46,7 @@ struct Args {
     self_test: Option<PathBuf>,
     bench_scroll: Option<PathBuf>,
     maximized: bool,
+    icons: bool,
     iterations: usize,
     out: Option<PathBuf>,
     help: bool,
@@ -62,6 +64,7 @@ fn parse_args() -> anyhow::Result<Args> {
         self_test: None,
         bench_scroll: None,
         maximized: false,
+        icons: false,
         iterations: 3,
         out: None,
         help: false,
@@ -95,6 +98,7 @@ fn parse_args() -> anyhow::Result<Args> {
                 a.bench_scroll = Some(it.next().context("--bench-scroll attend un dossier")?.into())
             }
             Some("--maximized") => a.maximized = true,
+            Some("--icons") => a.icons = true,
             Some("--self-test") => {
                 a.self_test = Some(it.next().context("--self-test attend un dossier")?.into())
             }
@@ -254,6 +258,7 @@ fn main() -> ExitCode {
         renderer,
         mica: args.mica.unwrap_or(cfg.mica),
         show_hidden: args.show_hidden.unwrap_or(cfg.show_hidden),
+        icons_view: args.icons || cfg.icons_view,
         network_timeout: args
             .network_timeout
             .map(std::time::Duration::from_secs)

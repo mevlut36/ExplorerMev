@@ -96,6 +96,8 @@ pub struct ScrollRun {
     /// Début de chaque image (`RedrawRequested`).
     pub frames: Vec<Instant>,
     pub rng: u64,
+    /// Défilement maximal, lu au premier tick.
+    pub max: Option<f64>,
     /// Minuterie qui pilote le défilement ; gardée vivante tant que la mesure dure.
     pub _driver: slint::Timer,
 }

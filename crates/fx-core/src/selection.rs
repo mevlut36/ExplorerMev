@@ -207,6 +207,30 @@ impl Selection {
         }
     }
 
+    /// Rectangle de sélection en vue icônes : les lignes `rows` (non contiguës), ajoutées à
+    /// `base` (Ctrl) ou seules.
+    pub fn select_rows(&mut self, visible: &[u32], rows: &[usize], base: Option<&Selection>) {
+        match base {
+            Some(base) => {
+                self.bits.clone_from(&base.bits);
+                self.count = base.count;
+            }
+            None => self.clear(),
+        }
+        for &r in rows {
+            if let Some(&e) = visible.get(r) {
+                self.set(e, true);
+            }
+        }
+        if let (Some(&a), Some(&f)) = (
+            rows.first().and_then(|&r| visible.get(r)),
+            rows.last().and_then(|&r| visible.get(r)),
+        ) {
+            self.anchor = Some(a);
+            self.focus = Some(f);
+        }
+    }
+
     /// Reporte la sélection sur un nouveau dossier (après une mise à jour) : `map` donne le
     /// nouvel index d'une ancienne entrée, s'il existe encore.
     pub fn remap(&self, new_len: usize, map: impl Fn(u32) -> Option<u32>) -> Selection {
@@ -354,6 +378,20 @@ mod tests {
         assert_eq!(s.selected_in(&v), vec![v[3], v[4], v[5], v[6]]);
         s.rectangle(&v, 3, 4, Some(&base));
         assert_eq!(s.selected_in(&v), vec![v[0], v[3], v[4]]);
+    }
+
+    #[test]
+    fn select_rows_with_and_without_base() {
+        let v = vis(10);
+        let mut s = Selection::new(10);
+        s.click(&v, 9, false, false);
+        let base = s.clone();
+        s.select_rows(&v, &[0, 1, 4, 5], None);
+        assert_eq!(s.selected_in(&v), vec![v[0], v[1], v[4], v[5]]);
+        assert_eq!(s.focus(), Some(v[5]));
+        s.select_rows(&v, &[2, 42], Some(&base));
+        assert_eq!(s.selected_in(&v), vec![v[2], v[9]]);
+        assert_eq!(s.count(), 2);
     }
 
     #[test]
