@@ -1,0 +1,21 @@
+[package]
+name = "fx-ui"
+description = "Interface Slint de l'explorateur et liaison avec le modèle."
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+fx-core.workspace = true
+fx-win.workspace = true
+raw-window-handle.workspace = true
+slint.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,499 @@
+// Fenêtre principale de l'explorateur (phase 1 : vue détails et navigation).
+
+import { ListView, LineEdit, Palette } from "std-widgets.slint";
+
+export struct Row {
+    name: string,
+    modified: string,
+    kind: string,
+    size: string,
+    is-dir: bool,
+    dimmed: bool,
+}
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    // Couleurs de « couche » Windows 11 posées sur le Mica.
+    out property <brush> layer: dark ? #3a3a3a4c : #ffffff80;
+    out property <brush> hover: dark ? #ffffff0f : #0000000a;
+    out property <brush> pressed: dark ? #ffffff0a : #00000006;
+    out property <brush> selected: dark ? #ffffff15 : #0000000f;
+    out property <brush> selected-hover: dark ? #ffffff1f : #00000017;
+    out property <brush> divider: dark ? #ffffff15 : #0000000f;
+    out property <brush> text-secondary: dark ? #ffffffc5 : #000000a0;
+    out property <brush> text-disabled: dark ? #ffffff5d : #0000005c;
+    out property <brush> folder: #e8b84a;
+    out property <length> row-height: 32px;
+    out property <string> icons: "Segoe Fluent Icons";
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> enabled: true;
+    in property <string> tooltip;
+    callback clicked;
+    width: 36px;
+    height: 32px;
+    border-radius: 4px;
+    background: !enabled ? transparent : ta.pressed ? Theme.pressed : ta.has-hover ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: tooltip;
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.glyph;
+        font-family: Theme.icons;
+        font-size: 16px;
+        color: root.enabled ? Palette.foreground : Theme.text-disabled;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in property <bool> sorted;
+    in property <bool> descending;
+    in property <bool> align-right;
+    in-out property <length> col-width;
+    callback clicked;
+    width: col-width;
+    accessible-role: button;
+    accessible-label: text;
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Rectangle {
+        background: ta.pressed ? Theme.pressed : ta.has-hover ? Theme.hover : transparent;
+    }
+    Text {
+        x: 12px;
+        width: parent.width - 24px;
+        text: root.text;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        horizontal-alignment: root.align-right ? right : left;
+        overflow: elide;
+    }
+    // Indicateur de tri, en haut au centre comme dans l'Explorateur.
+    if root.sorted: Text {
+        y: -1px;
+        width: parent.width;
+        height: 10px;
+        text: root.descending ? "\u{E70D}" : "\u{E70E}";
+        font-family: Theme.icons;
+        font-size: 8px;
+        color: Theme.text-secondary;
+        horizontal-alignment: center;
+    }
+    Rectangle {
+        x: parent.width - 4px;
+        width: 8px;
+        Rectangle {
+            x: 3px;
+            width: 1px;
+            height: 50%;
+            background: Theme.divider;
+        }
+        TouchArea {
+            mouse-cursor: col-resize;
+            moved => {
+                if self.pressed {
+                    root.col-width = max(48px, root.col-width + self.mouse-x - self.pressed-x);
+                }
+            }
+        }
+    }
+}
+
+component FileRow inherits Rectangle {
+    in property <Row> data;
+    in property <bool> selected;
+    in property <length> w-name;
+    in property <length> w-date;
+    in property <length> w-type;
+    in property <length> w-size;
+    callback clicked;
+    callback double-clicked;
+    height: Theme.row-height;
+    accessible-role: list-item;
+    accessible-label: data.name;
+    accessible-item-selected: selected;
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+    Rectangle {
+        x: 4px;
+        width: parent.width - 8px;
+        y: 1px;
+        height: parent.height - 2px;
+        border-radius: 4px;
+        background: root.selected ? (ta.has-hover ? Theme.selected-hover : Theme.selected) : ta.has-hover ? Theme.hover : transparent;
+    }
+    if root.selected: Rectangle {
+        x: 4px;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: Palette.accent-background;
+    }
+    Rectangle {
+        opacity: root.data.dimmed ? 0.55 : 1.0;
+        Text {
+            x: 14px;
+            width: 20px;
+            text: root.data.is-dir ? "\u{E8B7}" : "\u{E8A5}";
+            font-family: Theme.icons;
+            font-size: 16px;
+            color: root.data.is-dir ? Theme.folder : Theme.text-secondary;
+            vertical-alignment: center;
+        }
+        Text {
+            x: 42px;
+            width: root.w-name - 46px;
+            text: root.data.name;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    Text {
+        x: root.w-name + 12px;
+        width: root.w-date - 16px;
+        text: root.data.modified;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: root.w-name + root.w-date + 12px;
+        width: root.w-type - 16px;
+        text: root.data.kind;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: root.w-name + root.w-date + root.w-type;
+        width: root.w-size - 12px;
+        text: root.data.size;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+        overflow: elide;
+    }
+}
+
+export component MainWindow inherits Window {
+    title: root.folder-title == "" ? "WinDir" : root.folder-title + " — WinDir";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 480px;
+    min-height: 320px;
+    default-font-family: "Segoe UI Variable Text";
+    in property <bool> mica: true;
+    background: mica ? transparent : Palette.background;
+
+    // --- État fourni par Rust ---
+    in property <[Row]> rows;
+    in property <string> folder-title;
+    in-out property <string> address;
+    in property <string> status;
+    in property <string> error-text;
+    in property <bool> loading;
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    in property <bool> can-up;
+    in property <int> sort-column; // 0 nom, 1 date, 2 type, 3 taille
+    in property <bool> sort-descending;
+    in-out property <int> selected: -1;
+    in-out property <string> filter-text;
+
+    // --- Actions vers Rust ---
+    callback navigate-to(string);
+    callback go-back();
+    callback go-forward();
+    callback go-up();
+    callback refresh();
+    callback open-row(int);
+    callback sort-by(int);
+    callback filter-edited(string);
+    callback selection-changed(int);
+
+    in-out property <length> w-name: 340px;
+    in-out property <length> w-date: 160px;
+    in-out property <length> w-type: 170px;
+    in-out property <length> w-size: 100px;
+
+    // Sélection depuis Rust (ex. retour au parent) : fait défiler pour la rendre visible.
+    public function select-row(row: int) {
+        root.selected = row;
+        root.scroll-to-row(row);
+    }
+    public function focus-list() {
+        list-focus.focus();
+    }
+
+    function scroll-to-row(row: int) {
+        if row < 0 {
+            return;
+        }
+        if row * Theme.row-height < -file-list.content-y {
+            file-list.content-y = -row * Theme.row-height;
+        } else if (row + 1) * Theme.row-height > -file-list.content-y + file-list.visible-height {
+            file-list.content-y = -((row + 1) * Theme.row-height - file-list.visible-height);
+        }
+    }
+
+    function move-selection(row: int) {
+        if root.rows.length == 0 {
+            return;
+        }
+        root.selected = max(0, min(root.rows.length - 1, row));
+        root.scroll-to-row(root.selected);
+        root.selection-changed(root.selected);
+    }
+
+    property <int> page-rows: max(1, floor(file-list.visible-height / Theme.row-height) - 1);
+
+    // Raccourcis globaux (les événements non consommés par un champ de saisie remontent ici).
+    global-keys := FocusScope {
+        key-pressed(event) => {
+            if event.modifiers.alt && event.text == Key.LeftArrow {
+                root.go-back();
+                return accept;
+            }
+            if event.modifiers.alt && event.text == Key.RightArrow {
+                root.go-forward();
+                return accept;
+            }
+            if event.modifiers.alt && event.text == Key.UpArrow {
+                root.go-up();
+                return accept;
+            }
+            if event.text == Key.F5 {
+                root.refresh();
+                return accept;
+            }
+            if (event.modifiers.control && event.text == "l") || (event.modifiers.alt && event.text == "d") || event.text == Key.F4 {
+                address-edit.focus();
+                address-edit.select-all();
+                return accept;
+            }
+            if event.modifiers.control && (event.text == "f" || event.text == "e") {
+                filter-edit.focus();
+                filter-edit.select-all();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            // --- Barre de navigation ---
+            HorizontalLayout {
+                padding: 8px;
+                padding-bottom: 4px;
+                spacing: 4px;
+                height: 48px;
+                ToolButton {
+                    glyph: "\u{E72B}";
+                    tooltip: "Précédent (Alt+Gauche)";
+                    enabled: root.can-back;
+                    clicked => { root.go-back(); }
+                }
+                ToolButton {
+                    glyph: "\u{E72A}";
+                    tooltip: "Suivant (Alt+Droite)";
+                    enabled: root.can-forward;
+                    clicked => { root.go-forward(); }
+                }
+                ToolButton {
+                    glyph: "\u{E74A}";
+                    tooltip: "Dossier parent (Alt+Haut)";
+                    enabled: root.can-up;
+                    clicked => { root.go-up(); }
+                }
+                ToolButton {
+                    glyph: "\u{E72C}";
+                    tooltip: "Actualiser (F5)";
+                    clicked => { root.refresh(); }
+                }
+                address-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.address;
+                    font-size: 12px;
+                    accessible-label: "Adresse";
+                    accepted(text) => {
+                        root.navigate-to(text);
+                        list-focus.focus();
+                    }
+                }
+                filter-edit := LineEdit {
+                    width: 240px;
+                    placeholder-text: "Filtrer ce dossier";
+                    text <=> root.filter-text;
+                    font-size: 12px;
+                    accessible-label: "Filtre";
+                    edited(text) => { root.filter-edited(text); }
+                    key-pressed(event) => {
+                        if event.text == Key.Escape {
+                            root.filter-text = "";
+                            root.filter-edited("");
+                            list-focus.focus();
+                            return accept;
+                        }
+                        if event.text == Key.DownArrow {
+                            list-focus.focus();
+                            root.move-selection(0);
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+            }
+
+            // --- Contenu ---
+            Rectangle {
+                background: Theme.layer;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                VerticalLayout {
+                    padding-top: 4px;
+                    Rectangle {
+                        height: 32px;
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            alignment: start;
+                            HeaderCell {
+                                text: "Nom";
+                                col-width <=> root.w-name;
+                                sorted: root.sort-column == 0;
+                                descending: root.sort-descending;
+                                clicked => { root.sort-by(0); }
+                            }
+                            HeaderCell {
+                                text: "Modifié le";
+                                col-width <=> root.w-date;
+                                sorted: root.sort-column == 1;
+                                descending: root.sort-descending;
+                                clicked => { root.sort-by(1); }
+                            }
+                            HeaderCell {
+                                text: "Type";
+                                col-width <=> root.w-type;
+                                sorted: root.sort-column == 2;
+                                descending: root.sort-descending;
+                                clicked => { root.sort-by(2); }
+                            }
+                            HeaderCell {
+                                text: "Taille";
+                                align-right: true;
+                                col-width <=> root.w-size;
+                                sorted: root.sort-column == 3;
+                                descending: root.sort-descending;
+                                clicked => { root.sort-by(3); }
+                            }
+                        }
+                    }
+                    list-focus := FocusScope {
+                        accessible-role: list;
+                        accessible-label: "Contenu du dossier";
+                        key-pressed(event) => {
+                            if event.modifiers.alt || event.modifiers.control {
+                                return reject;
+                            }
+                            if event.text == Key.DownArrow {
+                                root.move-selection(root.selected + 1);
+                                return accept;
+                            }
+                            if event.text == Key.UpArrow {
+                                root.move-selection(root.selected - 1);
+                                return accept;
+                            }
+                            if event.text == Key.PageDown {
+                                root.move-selection(root.selected + root.page-rows);
+                                return accept;
+                            }
+                            if event.text == Key.PageUp {
+                                root.move-selection(root.selected - root.page-rows);
+                                return accept;
+                            }
+                            if event.text == Key.Home {
+                                root.move-selection(0);
+                                return accept;
+                            }
+                            if event.text == Key.End {
+                                root.move-selection(root.rows.length - 1);
+                                return accept;
+                            }
+                            if event.text == Key.Return && root.selected >= 0 {
+                                root.open-row(root.selected);
+                                return accept;
+                            }
+                            if event.text == Key.Backspace {
+                                root.go-up();
+                                return accept;
+                            }
+                            reject
+                        }
+                        file-list := ListView {
+                            for row[i] in root.rows: FileRow {
+                                data: row;
+                                selected: i == root.selected;
+                                w-name: root.w-name;
+                                w-date: root.w-date;
+                                w-type: root.w-type;
+                                w-size: root.w-size;
+                                clicked => {
+                                    list-focus.focus();
+                                    root.selected = i;
+                                    root.selection-changed(i);
+                                }
+                                double-clicked => { root.open-row(i); }
+                            }
+                        }
+                        if root.error-text != "": Rectangle {
+                            Text {
+                                x: 24px;
+                                y: 24px;
+                                width: parent.width - 48px;
+                                text: root.error-text;
+                                wrap: word-wrap;
+                                font-size: 14px;
+                                color: Theme.text-secondary;
+                            }
+                        }
+                        if root.error-text == "" && !root.loading && root.rows.length == 0: Text {
+                            y: 24px;
+                            text: root.filter-text == "" ? "Ce dossier est vide." : "Aucun élément ne correspond au filtre.";
+                            font-size: 12px;
+                            color: Theme.text-secondary;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // --- Barre d'état ---
+            Rectangle {
+                height: 26px;
+                background: Theme.layer;
+                Text {
+                    x: 16px;
+                    text: root.loading ? "Chargement…  " + root.status : root.status;
+                    font-size: 12px;
+                    color: Theme.text-secondary;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

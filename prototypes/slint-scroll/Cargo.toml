@@ -31,3 +31,6 @@ slint-build = "1.19.0"
 [features]
 # Active le moteur de rendu Skia pour comparaison (télécharge des binaires Skia précompilés).
 skia = ["slint/renderer-skia"]
+
+[lints]
+workspace = true

@@ -1,14 +1,51 @@
 [workspace]
 resolver = "3"
-members = ["prototypes/slint-scroll"]
+members = ["crates/*", "benches", "prototypes/slint-scroll"]
+default-members = ["crates/fx-app"]
 
 [workspace.package]
 edition = "2024"
+version = "0.1.0"
+publish = false
+
+[workspace.dependencies]
+fx-win = { path = "crates/fx-win" }
+fx-core = { path = "crates/fx-core" }
+fx-ui = { path = "crates/fx-ui" }
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+crossbeam-channel = "0.5.17"
+rayon = "1.12.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
+tracing-appender = "0.2.5"
+tempfile = "3.27.0"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+raw-window-handle = "0.6"
+slint = { version = "1.19.0", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+    "renderer-femtovg",
+    "raw-window-handle-06",
+    "unstable-winit-030",
+] }
+slint-build = "1.19.0"
+windows = "0.62.2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+undocumented_unsafe_blocks = "deny"
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"  # ADR 0004 : isolation des panics des workers
 strip = true
 opt-level = 3
 

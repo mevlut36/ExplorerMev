@@ -11,7 +11,16 @@
 //! En mode `--bench`, la liste défile toute seule selon trois scénarios, chaque image est
 //! horodatée via le rendering notifier de Slint, puis un rapport est affiché et le programme quitte.
 
-slint::include_modules!();
+#[allow(
+    clippy::all,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::undocumented_unsafe_blocks
+)]
+mod generated {
+    slint::include_modules!();
+}
+use generated::*;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
