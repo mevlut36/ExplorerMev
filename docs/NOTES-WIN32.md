@@ -305,3 +305,38 @@ reproduire.
 - **Priorité arrière-plan** : `SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN)`
   abaisse aussi les priorités d'E/S et de mémoire du thread (pool `rayon` dédié avec
   `start_handler`).
+
+## Phase 6
+
+- **Icône de fenêtre avec winit** : la fenêtre créée par winit n'a ni icône de classe ni
+  `WM_SETICON` : la barre de titre garde l'icône générique même si l'exécutable en embarque une.
+  Il faut envoyer `WM_SETICON` (`ICON_SMALL` et `ICON_BIG`) avec des icônes chargées par
+  `LoadImageW` à la taille des métriques système (`SM_CXSMICON`, `SM_CXICON`). L'identifiant de
+  ressource passé comme pointeur (`MAKEINTRESOURCE`) se construit avec
+  `std::ptr::without_provenance(1)` : le lint `manual_dangling_ptr` propose `dangling::<u16>()`,
+  qui vaut 2.
+- **Icône d'exécutable** : l'icône de plus petit numéro de ressource est celle de
+  l'exécutable ; entrées PNG acceptées dans l'ICO (256 px). À 32 px, l'icône sans la loupe
+  reste plus lisible : le dessin simplifie sous 48 px.
+- **Manifeste MSIX** : `makeappx pack` valide le schéma au paquetage. L'alias d'exécution se
+  déclare avec `uap5:Extension Category="windows.appExecutionAlias"` puis
+  `uap5:AppExecutionAlias` → `uap5:ExecutionAlias` (et non `desktop:ExecutionAlias`, rejeté).
+  `Publisher` du manifeste doit être **identique** au sujet du certificat de signature.
+- **Identité de paquet** : `GetCurrentPackageFullName` renvoie `APPMODEL_ERROR_NO_PACKAGE`
+  (15700) hors paquet, `ERROR_INSUFFICIENT_BUFFER` avec un tampon nul dans un paquet. Vérifié
+  hors paquet seulement.
+- **Registre isolé dans un paquet** (documenté par Microsoft, **non vérifié ici**, le paquet
+  n'ayant pas été installé) : les écritures sous `HKCU` et dans `%APPDATA%` d'une application
+  empaquetée sont redirigées vers un emplacement privé du paquet ; l'Explorateur ne voit donc
+  jamais la clé de « Remplacer Win+E ». L'option est refusée dans le paquet.
+- **Signature** : `signtool verify /pa` d'un paquet signé par un certificat auto-signé échoue
+  avec « A certificate chain processed, but terminated in a root certificate which is not
+  trusted » ; `Get-AuthenticodeSignature` renvoie `UnknownError`. C'est le comportement attendu
+  tant que le certificat n'est pas approuvé.
+- **PowerShell 5.1** : un script `.ps1` sans BOM est lu en ANSI (les accents deviennent
+  « Ã© ») : enregistrer en UTF-8 avec BOM. Les noms de variables ne distinguent pas la casse :
+  `$version` écrasait le paramètre `$Version` (le manifeste winget contenait le texte du
+  manifeste de version à la place du numéro). Un exécutable de sous-système graphique lancé par
+  `&` n'est attendu, et sa sortie n'est capturée, que s'il est dans un pipeline (`| Out-String`).
+- **Horodatage de signature** : demandé seulement avec `-TimestampUrl` ; il envoie l'empreinte du
+  paquet à un serveur externe, sans intérêt pour un certificat auto-signé.

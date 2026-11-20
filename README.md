@@ -3,14 +3,42 @@
 Explorateur de fichiers pour Windows 11, écrit en Rust, conçu pour être nettement plus rapide et
 plus léger que l'Explorateur Windows.
 
-> **État : phase 5 terminée (recherche instantanée).** Navigation, icônes, sélection multiple,
+> **État : phase 6 terminée (distribution).** Navigation, icônes, sélection multiple,
 > renommage, corbeille, presse-papiers, menu contextuel natif, glisser-déposer,
 > rafraîchissement automatique, partages réseau annulables, état OneDrive ; onglets avec
 > restauration de session, double volet, vue icônes avec vignettes, volet d'aperçu (texte,
 > images, PDF/Office par les prévisualiseurs de Windows), palette de commandes, taille des
 > dossiers, favoris, terminal, copie du chemin, propriétés, option « Remplacer Win+E » ;
 > recherche par nom sur tous les volumes NTFS (Ctrl+Maj+F), sans droits ou, sur demande, par
-> la MFT. Distribution : phase 6.
+> la MFT. Paquet MSIX signé (certificat auto-signé), archive portable, manifestes winget.
+
+## Installation
+
+WinDir n'a pas encore de version publiée : les livrables se produisent avec
+`packaging\package.ps1` (voir [Distribution](#distribution)).
+
+**Archive portable** (recommandée, aucun certificat requis) : décompresser
+`WinDir_<version>_x64_portable.zip` où l'on veut ; `windir.exe` est le seul fichier. Aucune
+installation : WinDir n'écrit que dans `%APPDATA%\WinDir` et `%LOCALAPPDATA%\WinDir` (et, si vous
+activez « Remplacer Win+E », une clé de votre compte dans le registre).
+
+**Paquet MSIX** : signé par un certificat **auto-signé** (`WinDir.cer`), que Windows ne connaît
+pas. Pour l'installer sur un poste, approuver d'abord ce certificat (invite administrateur),
+puis installer :
+
+```powershell
+Import-Certificate -FilePath .\WinDir.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+Add-AppxPackage .\WinDir_0.1.0_x64.msix
+```
+
+Ces deux commandes n'ont pas été exécutées pendant le développement (voir
+[Limites connues](#limites-connues)). Pour désinstaller : `Get-AppxPackage WinDir | Remove-AppxPackage`,
+puis retirer le certificat (`Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -like
+"CN=WinDir*" | Remove-Item`). Une distribution publique exige un certificat de signature de code
+approuvé.
+
+**winget** : les manifestes de l'archive portable se génèrent avec
+`packaging\winget\New-WingetManifest.ps1` ; aucun n'est publié.
 
 ## Compilation et lancement
 
@@ -106,14 +134,42 @@ localement), coche pleine (toujours conservé).
 Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/phase4.md),
 [phase 5](docs/mesures/phase5.md).
 
+## Limites connues
+
+- **Indexation par la MFT** (assistant élevé) : le code, le protocole et le filtre d'accès sont
+  testés, mais l'assistant n'a **jamais tourné élevé** : durée d'énumération et mémoire non
+  mesurées. Le comportement de l'élévation depuis le paquet MSIX n'est pas vérifié non plus.
+- **Paquet MSIX** : construit, signé et vérifié (intégrité, schéma du manifeste), mais **jamais
+  installé** : le certificat est auto-signé et n'est approuvé nulle part sur la machine de
+  développement. Dans le paquet, « Remplacer Win+E » est refusé (le registre y est isolé) et les
+  réglages sont lus et écrits dans un emplacement privé du paquet
+  (`%LOCALAPPDATA%\Packages\…\LocalCache`), pas dans `%APPDATA%\WinDir`.
+- **OneDrive** : jamais de lecture, de vignette ni d'aperçu d'un fichier « en ligne seulement »,
+  par construction ; non vérifié sur des fichiers réels de ce type (aucun sur la machine de
+  développement).
+- **Aperçu** : texte, images et PDF vérifiés ; les documents Office dépendent des
+  prévisualiseurs installés (non testés).
+- **Recherche** : volumes NTFS fixes seulement ; un fichier à liens physiques n'est indexé que
+  sous un nom ; des droits resserrés après coup ne retirent pas les noms déjà indexés avant la
+  reconstruction suivante ; en mode parcours, les changements faits pendant que WinDir est
+  fermé n'apparaissent qu'à la reconstruction (cache de plus de 10 minutes).
+- **Vue icônes, plein écran, sauts aléatoires dans 100 000 éléments** : 81 i/s au lieu des
+  60 i/s visés *constants* (quelques images lentes).
+- **Mesures** : une seule machine (Ryzen 5 5600X, échelle 100 %), démarrage « à froid »
+  approché (l'exécutable seul est relu depuis le disque), ouverture de dossier à froid non
+  mesurée.
+- **Licence** : aucune n'est définie dans le dépôt ; le manifeste winget généré porte
+  `Proprietary` en attendant votre choix.
+
 ## Organisation
 
 | Crate | Rôle |
 |---|---|
-| `crates/fx-win` | Seul crate avec `unsafe` : listing, chemins `\\?\`, DWM, Shell, locale |
-| `crates/fx-core` | Modèle sans interface : dossier compact, tri naturel, filtre, historique, chargeur |
+| `crates/fx-win` | Seul crate avec `unsafe` : listing, chemins `\\?\`, DWM, Shell, aperçus, tube nommé, MFT/USN, contrôle d'accès, locale |
+| `crates/fx-core` | Modèle sans interface : dossier compact, tri naturel, filtre, historique, chargeur, index de recherche et moteur |
 | `crates/fx-ui` | Interface Slint (style fluent, moteur de rendu logiciel) |
-| `crates/fx-app` | Binaire `windir.exe` : manifeste, journalisation, options |
+| `crates/fx-app` | Binaire `windir.exe` : manifeste, icône, journalisation, options, assistant d'indexation élevé |
+| `packaging` | Icône, manifeste MSIX, `package.ps1`, manifestes winget |
 | `benches` | Benchmarks criterion et générateur de jeux de fichiers |
 | `prototypes/slint-scroll` | Prototype jetable de la phase 0 |
 
@@ -124,7 +180,7 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
   [0002 Listing](docs/adr/0002-methode-listing.md) ·
   [0003 Index](docs/adr/0003-strategie-index.md) ·
   [0004 Panics](docs/adr/0004-strategie-panic.md)
-- Mesures : [phase 0](docs/mesures/phase0-prototype.md) · [phase 1](docs/mesures/phase1.md) · [phase 2](docs/mesures/phase2.md) · [phase 3](docs/mesures/phase3.md)
+- Mesures : [phase 0](docs/mesures/phase0-prototype.md) · [phase 1](docs/mesures/phase1.md) · [phase 2](docs/mesures/phase2.md) · [phase 3](docs/mesures/phase3.md) · [phase 4](docs/mesures/phase4.md) · [phase 5](docs/mesures/phase5.md) · [phase 6](docs/mesures/phase6.md)
 - [Notes Win32](docs/NOTES-WIN32.md)
 
 ## Développement
@@ -137,6 +193,20 @@ cargo run --release -p fx-bench --bin gen-fixtures   # une fois
 cargo bench -p fx-bench
 target\release\windir.exe --self-test "$env:TEMP\windir-selftest"   # scénario fonctionnel, dossier vide
 ```
+
+## Distribution
+
+```powershell
+.\packaging\package.ps1                      # compile puis produit dist\ (MSIX, zip, .cer, SHA256SUMS.txt)
+.\packaging\package.ps1 -SkipBuild           # réutilise target\release\windir.exe
+.\packaging\package.ps1 -Thumbprint <empreinte> [-TimestampUrl <url>]   # vrai certificat de signature
+.\packaging\package.ps1 -InstallerUrl <url du zip publié>               # + manifestes winget dans dist\winget
+```
+
+Prérequis : SDK Windows (`makeappx.exe`, `signtool.exe`). Sans `-Thumbprint`, le script crée un
+certificat auto-signé dans le magasin **personnel** de l'utilisateur (`CurrentUser\My`) ; il ne
+l'approuve nulle part. L'icône se redessine avec `packaging\make-icons.ps1`. Avant de soumettre
+les manifestes à winget-pkgs : renseigner l'éditeur, la licence et les URL.
 
 Journal : `%LOCALAPPDATA%\WinDir\logs`, niveau réglé par la variable `WINDIR_LOG`
 (`error`, `warn`, `info`, `debug`, `trace`, `off`).
