@@ -482,3 +482,52 @@ fn find_first(
         }
     }
 }
+
+/// Entrée possédée (copie d'une [`RawEntry`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedEntry {
+    pub name: Vec<u16>,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub size: u64,
+    pub created: i64,
+    pub modified: i64,
+}
+
+/// Métadonnées de l'entrée `name` du dossier `dir`, sans ouvrir le fichier (donc sans
+/// déclencher de téléchargement OneDrive). `None` si elle n'existe pas (ou plus).
+pub fn stat_entry(dir: &Path, name: &[u16]) -> Option<OwnedEntry> {
+    let mut wide = verbatim_wide(dir).ok()?;
+    wide.pop(); // nul final
+    if wide.last() != Some(&(b'\\' as u16)) {
+        wide.push(b'\\' as u16);
+    }
+    wide.extend_from_slice(name);
+    wide.push(0);
+    let mut data = WIN32_FIND_DATAW::default();
+    // SAFETY: chemin terminé par un nul ; `data` locale du type attendu par FindExInfoBasic.
+    let h = unsafe {
+        FindFirstFileExW(
+            PCWSTR(wide.as_ptr()),
+            FindExInfoBasic,
+            (&mut data as *mut WIN32_FIND_DATAW).cast(),
+            FindExSearchNameMatch,
+            None,
+            Default::default(),
+        )
+    }
+    .ok()?;
+    let _h = FindHandle(h);
+    let mut out = None;
+    emit_find(&data, &mut |e| {
+        out = Some(OwnedEntry {
+            name: e.name.to_vec(),
+            attributes: e.attributes,
+            reparse_tag: e.reparse_tag,
+            size: e.size,
+            created: e.created,
+            modified: e.modified,
+        })
+    });
+    out
+}

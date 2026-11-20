@@ -6,13 +6,21 @@
 
 #![cfg(windows)]
 
+pub mod clipboard;
 pub mod com;
+pub mod context_menu;
+pub mod dragdrop;
 pub mod dwm;
+pub mod fileop;
 mod handle;
+pub mod icons;
 pub mod listing;
 pub mod locale;
 pub mod path;
+mod pidl;
 pub mod process;
 pub mod shell;
+pub mod shell_host;
+pub mod watcher;
 
 pub use windows::core::Error as WinError;

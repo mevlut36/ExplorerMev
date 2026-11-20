@@ -264,3 +264,62 @@ fn volume_root_can_be_listed() -> Res {
     }
     Ok(())
 }
+
+#[test]
+fn watcher_reports_add_rename_remove_in_batches() -> Res {
+    use fx_win::watcher::{DirChange, watch};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let dir = tempfile::tempdir()?;
+    let (tx, rx) = channel();
+    let watcher = watch(dir.path(), move |batch| {
+        let _ = tx.send(batch);
+    })?;
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.path().join("nouveau.txt"), b"x")?;
+    std::fs::rename(dir.path().join("nouveau.txt"), dir.path().join("renommé.txt"))?;
+    std::fs::remove_file(dir.path().join("renommé.txt"))?;
+    let mut all = Vec::new();
+    while let Ok(batch) = rx.recv_timeout(Duration::from_millis(1000)) {
+        all.extend(batch);
+    }
+    drop(watcher);
+    assert!(all.contains(&DirChange::Added(w("nouveau.txt"))), "{all:?}");
+    assert!(all.contains(&DirChange::RenamedFrom(w("nouveau.txt"))), "{all:?}");
+    assert!(all.contains(&DirChange::RenamedTo(w("renommé.txt"))), "{all:?}");
+    assert!(all.contains(&DirChange::Removed(w("renommé.txt"))), "{all:?}");
+    Ok(())
+}
+
+#[test]
+fn watcher_reports_folder_deletion_and_stops_cleanly() -> Res {
+    use fx_win::watcher::{DirChange, watch};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let parent = tempfile::tempdir()?;
+    let dir = parent.path().join("surveillé");
+    std::fs::create_dir(&dir)?;
+    let (tx, rx) = channel();
+    let watcher = watch(&dir, move |batch| {
+        let _ = tx.send(batch);
+    })?;
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::remove_dir(&dir)?;
+    let mut got = Vec::new();
+    while let Ok(batch) = rx.recv_timeout(Duration::from_millis(1000)) {
+        got.extend(batch);
+    }
+    drop(watcher); // ne doit pas bloquer
+    assert!(got.contains(&DirChange::Gone), "{got:?}");
+    Ok(())
+}
+
+#[test]
+fn stat_entry_reads_one_entry() -> Res {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("été.bin"), vec![0u8; 77])?;
+    let e = fx_win::listing::stat_entry(dir.path(), &w("été.bin")).ok_or("absent")?;
+    assert_eq!(e.size, 77);
+    assert!(fx_win::listing::stat_entry(dir.path(), &w("absent")).is_none());
+    Ok(())
+}

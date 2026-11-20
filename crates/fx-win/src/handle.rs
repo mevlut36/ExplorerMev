@@ -6,6 +6,10 @@ use windows::Win32::Storage::FileSystem::FindClose;
 /// Handle de noyau fermé par `CloseHandle` à la destruction.
 pub(crate) struct OwnedHandle(pub(crate) HANDLE);
 
+// SAFETY: un handle de noyau n'est pas lié au thread qui l'a créé ; OwnedHandle en a la
+// propriété exclusive, donc le transférer à un autre thread ne crée pas d'accès concurrent.
+unsafe impl Send for OwnedHandle {}
+
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         if !self.0.is_invalid() {
