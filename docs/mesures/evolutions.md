@@ -58,3 +58,15 @@ l'application : mises en page, thèmes clair rose, sombre vert et menu Apparence
 - **Fichiers épinglés dans le volet de gauche** : le code ouvre un favori qui est un fichier ; seule la
   partie dossiers est exercée par l'auto-test.
 - **Fond teinté et thème clair** : lisibilité jugée sur capture ; pas de mesure de contraste.
+
+## Win+E : fenêtre au premier plan
+
+Windows interdit à un processus lancé en arrière-plan de s'attribuer le focus : la fenêtre ouverte par
+l'agent pouvait donc apparaître derrière les autres. L'agent appelle `AllowSetForegroundWindow` (tout
+processus) avant de lancer `explorermev --foreground`, et la fenêtre se place au premier plan au
+démarrage (`SetForegroundWindow`, repli : au-dessus des autres fenêtres), avec une seconde tentative
+250 ms plus tard.
+
+- **Vérifié** : une fenêtre lancée avec `--foreground` prend le premier plan en 120 ms (journal :
+  `front=true`).
+- **Non vérifié** : le chemin complet depuis une vraie frappe Win+E (l'agent n'a pas été exécuté ici).

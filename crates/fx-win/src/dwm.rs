@@ -70,6 +70,30 @@ pub fn system_prefers_dark() -> bool {
     r.0 != 0 || value == 0
 }
 
+/// Amène la fenêtre au premier plan (et la restaure si elle est réduite). Si Windows refuse le
+/// focus, elle passe au moins devant les autres fenêtres. `true` si elle a pris le focus.
+pub fn bring_to_front(hwnd: isize) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE,
+        SetForegroundWindow, SetWindowPos, ShowWindow,
+    };
+    let window = HWND(hwnd as *mut c_void);
+    // SAFETY: `hwnd` est la fenêtre principale de ce processus ; appels sans pointeur conservé.
+    unsafe {
+        if IsIconic(window).as_bool() {
+            let _ = ShowWindow(window, SW_RESTORE);
+        }
+        let _ = BringWindowToTop(window);
+        if SetForegroundWindow(window).as_bool() {
+            return true;
+        }
+        // Focus refusé : on la place au-dessus des autres sans la laisser « toujours au premier plan ».
+        let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        let _ = SetWindowPos(window, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    }
+    false
+}
+
 /// Applique à la fenêtre l'icône de l'exécutable (ressource numéro 1, voir `app.rc`), en
 /// petite taille (barre de titre) et en grande taille (Alt+Tab). winit ne le fait pas : sans
 /// cela la barre de titre garde l'icône générique.

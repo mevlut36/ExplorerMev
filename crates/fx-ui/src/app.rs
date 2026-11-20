@@ -213,6 +213,7 @@ pub(crate) struct App {
     /// Apparence choisie (mode, accent, teinte) et thème de Windows.
     appearance: Cell<crate::appearance::Appearance>,
     theme_forced: bool,
+    foreground: bool,
     /// Données de la page d'accueil (dernier calcul) et colonnes de cartes affichées.
     home_data: RefCell<crate::home::HomeData>,
     home_columns: Cell<usize>,
@@ -303,6 +304,7 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
             None => crate::appearance::load(options.data_dir.as_deref()),
         }),
         theme_forced: options.theme_override.is_some() || options.bench.is_some(),
+        foreground: options.foreground,
         home_data: RefCell::default(),
         home_columns: Cell::new(3),
         home_seq: Cell::new(0),
@@ -553,6 +555,16 @@ impl App {
                 .set(t == slint::winit_030::winit::window::Theme::Dark);
         }
         self.apply_appearance();
+        if self.foreground {
+            // Win+E : la fenêtre doit apparaître devant. Une seconde tentative laisse à Windows le
+            // temps de l'afficher (le droit cédé par l'agent reste valable jusqu'à la prochaine
+            // entrée de l'utilisateur).
+            let front = fx_win::dwm::bring_to_front(h);
+            tracing::info!(front, "premier plan demandé (Win+E)");
+            slint::Timer::single_shot(Duration::from_millis(250), move || {
+                fx_win::dwm::bring_to_front(h);
+            });
+        }
         match fx_win::dragdrop::register(h, Box::new(UiDrop)) {
             Ok(reg) => *self.drop_reg.borrow_mut() = Some(reg),
             Err(e) => tracing::warn!("cible de glisser-déposer non enregistrée : {e}"),

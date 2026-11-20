@@ -29,6 +29,7 @@ Options :
   --bench-scroll <dossier>    mesure le défilement dans <dossier> et quitte (--maximized : plein écran)
   --bench-search              mesure la recherche globale (frappe simulée, mémoire) et quitte
   --theme <réglages>          apparence pour cette session seulement (ex. mode=clair,accent=rose,teinte=1)
+  --foreground                prend le premier plan au démarrage (utilisé par le raccourci Win+E)
   --icons                     ouvre les volets en vue icônes (réglage « view » de config.toml)
   --self-test <dossier vide>  scénario d'auto-test dans ce dossier (créé et modifié !), puis quitte
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
@@ -55,6 +56,7 @@ struct Args {
     bench_search: bool,
     maximized: bool,
     icons: bool,
+    foreground: bool,
     theme: Option<String>,
     iterations: usize,
     out: Option<PathBuf>,
@@ -78,6 +80,7 @@ fn parse_args() -> anyhow::Result<Args> {
         bench_search: false,
         maximized: false,
         icons: false,
+        foreground: false,
         theme: None,
         iterations: 3,
         out: None,
@@ -117,6 +120,7 @@ fn parse_args() -> anyhow::Result<Args> {
             }
             Some("--maximized") => a.maximized = true,
             Some("--icons") => a.icons = true,
+            Some("--foreground") => a.foreground = true,
             Some("--theme") => {
                 a.theme = Some(
                     it.next()
@@ -162,7 +166,11 @@ fn parse_args() -> anyhow::Result<Args> {
 /// Agent résident : Win+E ouvre ExplorerMev (une seule instance, arrêt par `--default-explorer off`).
 fn hotkey_agent() -> ExitCode {
     fn open_window() -> bool {
-        match fx_win::process::launch_path().and_then(|exe| std::process::Command::new(exe).spawn()) {
+        // L'agent vient de recevoir la frappe : il cède le droit de passer au premier plan.
+        fx_win::hotkey::allow_foreground();
+        match fx_win::process::launch_path()
+            .and_then(|exe| std::process::Command::new(exe).arg("--foreground").spawn())
+        {
             Ok(_) => true,
             Err(e) => {
                 tracing::warn!("Win+E : lancement impossible : {e}");
@@ -460,6 +468,7 @@ fn main() -> ExitCode {
         show_hidden: args.show_hidden.unwrap_or(cfg.show_hidden),
         icons_view: args.icons || cfg.icons_view,
         index_mft: cfg.index_mft,
+        foreground: args.foreground,
         theme_override: args.theme.clone(),
         network_timeout: args
             .network_timeout

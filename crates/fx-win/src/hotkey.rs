@@ -191,6 +191,17 @@ fn agent_window() -> Option<HWND> {
     unsafe { FindWindowExW(Some(HWND_MESSAGE), None, AGENT_CLASS, None).ok() }
 }
 
+/// Autorise le prochain processus qui le demande à prendre le premier plan. Windows interdit à un
+/// processus lancé en arrière-plan de s'attribuer le focus ; l'agent, qui vient de recevoir la
+/// frappe, a ce droit et peut le céder (jusqu'à la prochaine entrée de l'utilisateur).
+pub fn allow_foreground() {
+    use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+    // SAFETY: appel sans pointeur ; ASFW_ANY : valeur documentée pour « tout processus ».
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
 /// L'agent tourne-t-il ?
 pub fn is_agent_running() -> bool {
     agent_window().is_some()

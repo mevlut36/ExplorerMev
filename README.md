@@ -129,7 +129,8 @@ Pour votre compte seulement, ExplorerMev s'ouvre alors :
   `explorer.exe` lui-même (la commande du Registre n'est pas consultée). Un **petit agent résident**
   (`explorermev --hotkey-agent`, lancé à l'ouverture de session par la clé `Run` de
   votre compte) intercepte Win+E, et seulement elle, et ouvre ExplorerMev ; si le lancement échoue le
-  raccourci reste à Windows. `--default-explorer off` l'arrête et retire son démarrage automatique ;
+  raccourci reste à Windows. La fenêtre s'ouvre **au premier plan** (l'agent cède à Windows le droit
+  de passer devant, et la fenêtre le demande avec `--foreground`). `--default-explorer off` l'arrête et retire son démarrage automatique ;
 - quand un **dossier ou un lecteur** est ouvert depuis un autre programme, avec Win+R ou depuis le
   menu Démarrer (verbe `open` des classes `Directory` et `Drive`).
 

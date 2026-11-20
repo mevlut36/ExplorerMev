@@ -60,6 +60,8 @@ pub struct Options {
     pub index_dir: Option<PathBuf>,
     /// Indexer par la MFT (assistant élevé) dès le démarrage de la recherche.
     pub index_mft: bool,
+    /// Prendre le premier plan au démarrage (lancement par le raccourci Win+E).
+    pub foreground: bool,
     /// Apparence imposée pour cette session, non mémorisée (`--theme mode=clair,accent=rose`).
     pub theme_override: Option<String>,
     pub bench: Option<BenchMode>,
