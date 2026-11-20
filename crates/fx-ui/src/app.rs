@@ -126,6 +126,8 @@ enum Cmd {
     FolderSize,
     AddFavorite,
     RemoveFavorite,
+    WinEOn,
+    WinEOff,
 }
 
 const COMMANDS: &[(Cmd, &str, &str)] = &[
@@ -159,6 +161,8 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::FolderSize, "Calculer la taille des dossiers", "Ctrl+Maj+S"),
     (Cmd::AddFavorite, "Ajouter aux favoris", "Ctrl+D"),
     (Cmd::RemoveFavorite, "Retirer des favoris", ""),
+    (Cmd::WinEOn, "Remplacer Win+E par WinDir…", ""),
+    (Cmd::WinEOff, "Rendre Win+E à l'Explorateur", ""),
 ];
 
 pub(crate) struct App {
@@ -1023,6 +1027,8 @@ impl App {
             Cmd::FolderSize => self.folder_sizes(),
             Cmd::AddFavorite => self.add_favorite(),
             Cmd::RemoveFavorite => self.remove_favorite(),
+            Cmd::WinEOn => self.set_win_e(true),
+            Cmd::WinEOff => self.set_win_e(false),
         }
     }
 
@@ -1050,6 +1056,50 @@ impl App {
             p.current_path().into_iter().collect()
         } else {
             sel
+        }
+    }
+
+    /// Option « Remplacer Win+E » (désactivée par défaut). L'activation est confirmée ; la
+    /// désactivation ne retire que la clé posée par WinDir.
+    fn set_win_e(self: &Rc<Self>, on: bool) {
+        let owner = self.hwnd.get().unwrap_or(0);
+        let id = self.active_pane().id;
+        let exe = std::env::current_exe();
+        let posted = self.host_post_raw(move |_| {
+            let key = fx_win::win_e::WinEKey::default();
+            let msg = if on {
+                match exe {
+                    Err(e) => format!("Chemin de WinDir introuvable : {e}"),
+                    Ok(exe) => {
+                        let ok = fx_win::shell::confirm(
+                            owner,
+                            "Remplacer Win+E",
+                            "La touche Windows+E ouvrira WinDir au lieu de l'Explorateur, pour \
+                             votre compte uniquement.\n\nLa commande « Rendre Win+E à \
+                             l'Explorateur » (ou « windir --win-e off ») rétablit le \
+                             comportement d'origine.\n\nContinuer ?",
+                        );
+                        if !ok {
+                            return;
+                        }
+                        match key.enable(&exe) {
+                            Ok(()) => "Win+E ouvre désormais WinDir.".to_string(),
+                            Err(e) => e.to_string(),
+                        }
+                    }
+                }
+            } else {
+                match key.disable() {
+                    Ok(true) => "Win+E ouvre de nouveau l'Explorateur.".to_string(),
+                    Ok(false) => "Win+E n'était pas associé à WinDir : rien à changer.".to_string(),
+                    Err(e) => format!("Registre : {}", e.message()),
+                }
+            };
+            post_pane(id, move |p| p.flash_status(msg));
+        });
+        if !posted {
+            self.active_pane()
+                .flash_status("Le service Shell est indisponible.".into());
         }
     }
 

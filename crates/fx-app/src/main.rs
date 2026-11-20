@@ -30,6 +30,7 @@ Options :
   --self-test <dossier vide>  scénario d'auto-test dans ce dossier (créé et modifié !), puis quitte
   --iterations <n>            nombre d'ouvertures pour --bench-open (défaut : 3)
   --out <fichier>             écrit aussi le rapport de mesure dans <fichier>
+  --win-e <on|off|status>     Win+E ouvre WinDir (on) ou l'Explorateur (off), puis quitte
   -h, --help                  affiche cette aide
 
 Configuration : %APPDATA%\\WinDir\\config.toml (les options ci-dessus sont prioritaires)
@@ -50,6 +51,7 @@ struct Args {
     iterations: usize,
     out: Option<PathBuf>,
     help: bool,
+    win_e: Option<String>,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
@@ -68,6 +70,7 @@ fn parse_args() -> anyhow::Result<Args> {
         iterations: 3,
         out: None,
         help: false,
+        win_e: None,
     };
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
@@ -111,11 +114,56 @@ fn parse_args() -> anyhow::Result<Args> {
             }
             Some("--out") => a.out = Some(it.next().context("--out attend un fichier")?.into()),
             Some("-h" | "--help" | "/?") => a.help = true,
+            Some("--win-e") => {
+                let v = it.next().context("--win-e attend on, off ou status")?;
+                match v.to_str() {
+                    Some(s @ ("on" | "off" | "status")) => a.win_e = Some(s.into()),
+                    _ => bail!("--win-e attend on, off ou status"),
+                }
+            }
             Some(s) if s.starts_with("--") => bail!("option inconnue : {s}"),
             _ => a.path = Some(PathBuf::from(arg)),
         }
     }
     Ok(a)
+}
+
+/// `--win-e on|off|status` : option « Remplacer Win+E » sans interface (installation,
+/// désinstallation, scripts).
+fn win_e(action: &str) -> ExitCode {
+    use fx_win::win_e::{WinEKey, WinEState};
+    let key = WinEKey::default();
+    let result: anyhow::Result<String> = (|| {
+        Ok(match action {
+            "on" => {
+                let exe = std::env::current_exe()?;
+                key.enable(&exe)?;
+                format!("Win+E ouvre désormais {}.", exe.display())
+            }
+            "off" => {
+                if key.disable()? {
+                    "Win+E ouvre de nouveau l'Explorateur.".into()
+                } else {
+                    "Win+E n'était pas associé à WinDir : rien à changer.".into()
+                }
+            }
+            _ => match key.state()? {
+                WinEState::Default => "Win+E : Explorateur (comportement de Windows).".into(),
+                WinEState::WinDir(p) => format!("Win+E : WinDir ({}).", p.display()),
+                WinEState::Other(c) => format!("Win+E : autre programme ({c})."),
+            },
+        })
+    })();
+    match result {
+        Ok(msg) => {
+            println!("{msg}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn log_dir() -> Option<PathBuf> {
@@ -185,13 +233,16 @@ fn main() -> ExitCode {
         || args.bench_open.is_some()
         || args.self_test.is_some()
         || args.bench_scroll.is_some();
-    if args.help || benching {
+    if args.help || benching || args.win_e.is_some() {
         // Sous-système GUI : on se rattache à la console du parent pour y écrire.
         fx_win::process::attach_parent_console();
     }
     if args.help {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
+    }
+    if let Some(action) = &args.win_e {
+        return win_e(action);
     }
     // Les mesures et l'auto-test ignorent la configuration de l'utilisateur (reproductibilité).
     let (cfg, warnings) = match (benching, config::default_path()) {

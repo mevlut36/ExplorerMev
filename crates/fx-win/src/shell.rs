@@ -194,6 +194,26 @@ pub fn error_box(title: &str, text: &str) {
     }
 }
 
+/// Question Oui/Non (Non par défaut). À appeler hors du thread d'interface (boîte modale).
+pub fn confirm(owner: isize, title: &str, text: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
+    };
+    let t: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let m: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let owner = (owner != 0).then_some(HWND(owner as *mut c_void));
+    // SAFETY: deux chaînes terminées par un nul, vivantes pendant l'appel ; fenêtre propriétaire
+    // valide ou aucune.
+    unsafe {
+        MessageBoxW(
+            owner,
+            PCWSTR(m.as_ptr()),
+            PCWSTR(t.as_ptr()),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+        ) == IDYES
+    }
+}
+
 /// Boîte de dialogue « Propriétés » de Windows pour un ou plusieurs éléments d'un même dossier.
 /// À appeler sur un thread STA qui pompe des messages (l'hôte Shell).
 pub fn show_properties(paths: &[PathBuf], owner: isize) -> windows::core::Result<()> {
