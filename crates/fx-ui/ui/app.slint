@@ -294,6 +294,9 @@ component FileRow inherits Rectangle {
     accessible-item-selected: data.selected;
 
     property <bool> pressed-on-name;
+    property <bool> pressed-on-label;
+    // Zone du texte du nom (pour le renommage par clic lent).
+    out property <length> label-end: 40px + min(name-text.preferred-width, root.w-name - 44px);
 
     // Mise en évidence d'un élément créé : l'indicateur est faux à la création de la ligne puis
     // passe à vrai (init) : le fondu à l'apparition est animé, comme celui de la disparition.
@@ -304,9 +307,13 @@ component FileRow inherits Rectangle {
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 root.pressed-on-name = self.mouse-x < root.w-name;
+                root.pressed-on-label = self.mouse-x >= 40px && self.mouse-x < root.label-end;
                 root.pointer(0, e.modifiers.control, e.modifiers.shift, root.pressed-on-name);
             } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
                 root.pointer(1, e.modifiers.control, e.modifiers.shift, root.pressed-on-name);
+                if root.pressed-on-label && self.mouse-x >= 40px && self.mouse-x < root.label-end {
+                    root.pointer(4, false, false, true);
+                }
             } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
                 root.pointer(3, e.modifiers.control, e.modifiers.shift, true);
             }
@@ -367,7 +374,8 @@ component FileRow inherits Rectangle {
             color: root.data.is-dir ? Theme.folder : Theme.text-secondary;
             vertical-alignment: center;
         }
-        if !root.renaming: Text {
+        name-text := Text {
+            visible: !root.renaming;
             x: 40px;
             width: root.w-name - 44px;
             text: root.data.name;
@@ -645,14 +653,19 @@ component Tile inherits Rectangle {
     accessible-item-selected: data.selected;
 
     property <bool> flash;
+    property <bool> pressed-on-label;
     init => { self.flash = root.data.fresh; }
     changed data => { self.flash = root.data.fresh; }
     ta := TouchArea {
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.pressed-on-label = self.mouse-y >= Theme.tile-icon + 10px;
                 root.pointer(0, e.modifiers.control, e.modifiers.shift);
             } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.left {
                 root.pointer(1, e.modifiers.control, e.modifiers.shift);
+                if root.pressed-on-label && self.mouse-y >= Theme.tile-icon + 10px {
+                    root.pointer(4, false, false);
+                }
             } else if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
                 root.pointer(3, e.modifiers.control, e.modifiers.shift);
             }

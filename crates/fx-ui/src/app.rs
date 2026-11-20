@@ -2739,6 +2739,55 @@ impl App {
                 next(1500, dir);
             }
             41 => {
+                // Retour à un dossier pour le renommage par clic lent.
+                p.go_back();
+                next(900, dir);
+            }
+            42 => {
+                // Clic lent : appui + relâchement sur le nom d'un élément déjà sélectionné.
+                let ready = p.model.len() > 0 && !p.is_home();
+                self.check(ready, "clic lent : un dossier est affiché");
+                p.model.update_selection(|sel, v| sel.click(v, 0, false, false));
+                p.row_pointer(0, 0, false, false, true);
+                p.row_pointer(0, 1, false, false, true);
+                p.row_pointer(0, 4, false, false, true);
+                self.check(
+                    p.st.borrow().rename_entry.is_none(),
+                    "clic lent : pas de renommage immédiat",
+                );
+                next(u64::from(fx_win::shell::double_click_ms()) + 500, dir);
+            }
+            43 => {
+                let ui = p.ui_snapshot();
+                self.check(
+                    p.st.borrow().rename_entry.is_some() && ui.rename_row == 0,
+                    "clic lent : le nom passe en édition après le délai de double-clic",
+                );
+                p.rename_cancel();
+                // Annulation : un nouvel appui (ici dans le vide) avant la fin du délai.
+                p.model.update_selection(|sel, v| sel.click(v, 0, false, false));
+                p.row_pointer(0, 0, false, false, true);
+                p.row_pointer(0, 1, false, false, true);
+                p.row_pointer(0, 4, false, false, true);
+                p.background_pointer(0, false, false);
+                next(u64::from(fx_win::shell::double_click_ms()) + 500, dir);
+            }
+            44 => {
+                self.check(
+                    p.st.borrow().rename_entry.is_none(),
+                    "clic lent : annulé par un clic dans le vide",
+                );
+                // Un premier clic sur un élément non sélectionné ne déclenche pas de renommage.
+                p.row_pointer(0, 0, false, false, true);
+                p.row_pointer(0, 1, false, false, true);
+                p.row_pointer(0, 4, false, false, true);
+                next(u64::from(fx_win::shell::double_click_ms()) + 500, dir);
+            }
+            45 => {
+                self.check(
+                    p.st.borrow().rename_entry.is_none(),
+                    "clic lent : le premier clic (sélection) ne renomme pas",
+                );
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
             _ => {}

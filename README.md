@@ -65,7 +65,7 @@ target\release\explorermev.exe --help
 | Retour arrière, Alt+Haut | Dossier parent (resélectionne le dossier d'origine) |
 | Alt+Gauche / Alt+Droite | Précédent / suivant |
 | F5 | Actualiser |
-| F2 | Renommer |
+| F2, ou clic sur le nom d'un élément déjà sélectionné | Renommer (le clic lent attend le délai de double-clic de Windows ; un double-clic, un glissement ou un autre clic l'annule) |
 | Suppr / Maj+Suppr | Corbeille / suppression définitive (confirmée par Windows) |
 | Ctrl+C, Ctrl+X, Ctrl+V | Copier, couper, coller (compatible avec l'Explorateur) |
 | Ctrl+Maj+N | Nouveau dossier |

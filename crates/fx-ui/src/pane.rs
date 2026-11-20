@@ -116,6 +116,12 @@ pub(crate) struct State {
     /// Appui sur un élément déjà sélectionné : la sélection ne change qu'au relâchement
     /// (pour pouvoir glisser plusieurs éléments).
     pub press_deferred: Option<usize>,
+    /// Appui sur le nom de l'unique élément déjà sélectionné : un relâchement sur le nom, sans
+    /// glissement ni double-clic, lance le renommage (clic lent, comme l'Explorateur).
+    pub rename_candidate: bool,
+    pub rename_armed: bool,
+    /// Incrémenté pour annuler un renommage par clic lent en attente.
+    pub rename_gen: u64,
     pub dragging: bool,
     pub marquee_base: Option<Selection>,
     /// Calculs de taille de dossiers en cours (annulés au changement de dossier).
@@ -489,6 +495,7 @@ impl Pane {
             st.pending_select.clear();
             st.pending_rename = false;
             st.rename_entry = None;
+            st.rename_gen += 1;
             st.press_deferred = None;
             st.marquee_base = None;
             for j in st.size_jobs.drain(..) {
@@ -542,6 +549,7 @@ impl Pane {
             st.applying = false;
             st.queued.clear();
             st.rename_entry = None;
+            st.rename_gen += 1;
             st.press_deferred = None;
             st.marquee_base = None;
             st.spec
@@ -996,8 +1004,12 @@ impl Pane {
                     .entry_at(row)
                     .is_some_and(|e| self.model.selection().is_selected(e));
                 let base = (!on_name && ctrl).then(|| self.model.selection());
+                let sole = already && self.model.selected().len() == 1;
                 {
                     let mut st = self.st.borrow_mut();
+                    st.rename_gen += 1;
+                    st.rename_armed = false;
+                    st.rename_candidate = sole && !ctrl && !shift;
                     st.dragging = false;
                     st.marquee_base = base;
                     st.press_deferred = (already && !ctrl && !shift).then_some(row);
@@ -1011,6 +1023,7 @@ impl Pane {
                 let deferred = {
                     let mut st = self.st.borrow_mut();
                     let d = if st.dragging { None } else { st.press_deferred };
+                    st.rename_armed = std::mem::take(&mut st.rename_candidate) && !st.dragging;
                     st.press_deferred = None;
                     st.dragging = false;
                     d
@@ -1020,8 +1033,15 @@ impl Pane {
                     self.update_status();
                 }
             }
-            2 => self.open_selection(),
+            // Relâchement sur le nom (après un appui sur le nom) : renommage au bout du délai de
+            // double-clic, sauf double-clic, nouvel appui ou changement de sélection entre-temps.
+            4 => self.arm_slow_rename(row),
+            2 => {
+                self.cancel_slow_rename();
+                self.open_selection();
+            }
             3 => {
+                self.cancel_slow_rename();
                 self.model.update_selection(|s, v| s.right_click(v, row));
                 self.update_status();
                 let (x, y) = fx_win::shell::cursor_pos();
@@ -1031,7 +1051,41 @@ impl Pane {
         }
     }
 
+    fn cancel_slow_rename(&self) {
+        let mut st = self.st.borrow_mut();
+        st.rename_gen += 1;
+        st.rename_armed = false;
+        st.rename_candidate = false;
+    }
+
+    fn arm_slow_rename(self: &Rc<Self>, row: usize) {
+        let Some(entry) = self.model.entry_at(row) else {
+            return;
+        };
+        let generation = {
+            let mut st = self.st.borrow_mut();
+            if !std::mem::take(&mut st.rename_armed) || st.rename_entry.is_some() {
+                return;
+            }
+            st.rename_gen += 1;
+            st.rename_gen
+        };
+        let id = self.id;
+        let delay = Duration::from_millis(u64::from(fx_win::shell::double_click_ms()) + 60);
+        slint::Timer::single_shot(delay, move || {
+            with_pane(id, |p| {
+                let still = p.st.borrow().rename_gen == generation
+                    && p.st.borrow().rename_entry.is_none()
+                    && p.model.selected() == [entry];
+                if still {
+                    p.begin_rename();
+                }
+            })
+        });
+    }
+
     pub(crate) fn background_pointer(self: &Rc<Self>, kind: i32, ctrl: bool, _shift: bool) {
+        self.cancel_slow_rename();
         match kind {
             0 => {
                 let base = ctrl.then(|| self.model.selection());

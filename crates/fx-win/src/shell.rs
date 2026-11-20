@@ -167,6 +167,12 @@ pub fn display_name(path: &Path) -> Option<String> {
     (len > 0).then(|| String::from_utf16_lossy(&info.szDisplayName[..len]))
 }
 
+/// Délai de double-clic configuré dans Windows, en millisecondes.
+pub fn double_click_ms() -> u32 {
+    // SAFETY: appel sans argument ni pointeur.
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }
+}
+
 /// Position du curseur, en pixels écran.
 pub fn cursor_pos() -> (i32, i32) {
     let mut p = windows::Win32::Foundation::POINT::default();
