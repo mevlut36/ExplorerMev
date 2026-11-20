@@ -86,6 +86,25 @@ pub fn build(ready: impl FnOnce(Vec<NavEntry>) + Send + 'static) {
                 header: false,
             });
         }
+        // Linux (WSL) : une entrée par distribution installée, comme le nœud « Linux » de
+        // l'Explorateur.
+        let distros = fx_win::wsl::distributions();
+        if !distros.is_empty() {
+            out.push(NavEntry {
+                label: "Linux".into(),
+                glyph: "",
+                path: PathBuf::new(),
+                header: true,
+            });
+            for d in distros {
+                out.push(NavEntry {
+                    path: PathBuf::from(format!(r"{}\{d}", fx_core::wsl::ROOT)),
+                    label: d,
+                    glyph: "\u{E756}",
+                    header: false,
+                });
+            }
+        }
         ready(out);
     });
     if let Err(e) = spawned {
@@ -97,12 +116,32 @@ pub fn build(ready: impl FnOnce(Vec<NavEntry>) + Send + 'static) {
 /// connu (« Disque local (C:) »).
 pub fn crumbs(path: &Path, drive_labels: &HashMap<PathBuf, String>) -> Vec<(String, PathBuf)> {
     let shown = fx_win::path::display_form(path);
+    // Racine « Linux » : un segment lui est consacré.
+    if fx_core::wsl::is_root(&shown) {
+        return vec![("Linux".into(), PathBuf::from(fx_core::wsl::ROOT))];
+    }
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     let mut acc = PathBuf::new();
     for comp in shown.components() {
         match comp {
             Component::Prefix(p) => {
+                // `\\wsl.localhost\Ubuntu` : segments « Linux » puis « Ubuntu ».
+                if let std::path::Prefix::UNC(server, share) = p.kind()
+                    && (server.eq_ignore_ascii_case("wsl.localhost") || server.eq_ignore_ascii_case("wsl$"))
+                {
+                    out.push(("Linux".into(), PathBuf::from(fx_core::wsl::ROOT)));
+                    out.push((share.to_string_lossy().into_owned(), p.as_os_str().into()));
+                }
                 acc.push(p.as_os_str());
+            }
+            Component::RootDir
+                if matches!(
+                    out.last(),
+                    Some((l, _)) if l != "Linux" && fx_core::wsl::parent_of_distro_root(&acc).is_some()
+                ) =>
+            {
+                // Racine d'une distribution : déjà représentée par le segment précédent.
+                acc.push("\\");
             }
             Component::RootDir => {
                 acc.push("\\");
@@ -167,6 +206,26 @@ mod tests {
         let names: Vec<&str> = c.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(names, ["Disque local (C:)", "Users", "moi"]);
         assert_eq!(c[1].1, PathBuf::from(r"C:\Users"));
+    }
+
+    #[test]
+    fn crumbs_of_wsl_paths() {
+        let names = |p: &str| -> Vec<String> {
+            crumbs(Path::new(p), &HashMap::new())
+                .into_iter()
+                .map(|(l, _)| l)
+                .collect()
+        };
+        assert_eq!(names(r"\\wsl.localhost"), ["Linux"]);
+        assert_eq!(names(r"\\wsl.localhost\Ubuntu"), ["Linux", "Ubuntu"]);
+        assert_eq!(
+            names(r"\\wsl.localhost\Ubuntu\home\moi"),
+            ["Linux", "Ubuntu", "home", "moi"]
+        );
+        let c = crumbs(Path::new(r"\\wsl.localhost\Ubuntu\home"), &HashMap::new());
+        assert_eq!(c[0].1, PathBuf::from(r"\\wsl.localhost"));
+        assert_eq!(c[1].1, PathBuf::from(r"\\wsl.localhost\Ubuntu"));
+        assert_eq!(c[2].1, PathBuf::from(r"\\wsl.localhost\Ubuntu\home"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, IDataObject};
 use windows::Win32::UI::Shell::{
     COPYENGINE_E_USER_CANCELLED, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR,
@@ -36,6 +36,11 @@ pub enum FileOp {
     },
     /// Crée un dossier ; un suffixe « (2) » est ajouté en cas de collision.
     NewFolder {
+        parent: PathBuf,
+        name: OsString,
+    },
+    /// Crée un fichier vide ; un suffixe « (2) » est ajouté en cas de collision.
+    NewFile {
         parent: PathBuf,
         name: OsString,
     },
@@ -307,6 +312,22 @@ pub fn perform(op: &FileOp, opts: OpOptions) -> windows::core::Result<OpOutcome>
                 fo.NewItem(
                     &dest,
                     FILE_ATTRIBUTE_DIRECTORY.0,
+                    PCWSTR(name.as_ptr()),
+                    PCWSTR::null(),
+                    None,
+                )?
+            };
+            run(&fo)
+        }
+        FileOp::NewFile { parent, name } => {
+            let fo = new_operation(opts, FOF_ALLOWUNDO | FOF_RENAMEONCOLLISION)?;
+            let dest = shell_item(parent)?;
+            let name = wide_nul(name);
+            // SAFETY: voir Rename.
+            unsafe {
+                fo.NewItem(
+                    &dest,
+                    FILE_ATTRIBUTE_NORMAL.0,
                     PCWSTR(name.as_ptr()),
                     PCWSTR::null(),
                     None,

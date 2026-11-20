@@ -28,5 +28,6 @@ pub mod shell_host;
 pub mod usn;
 pub mod watcher;
 pub mod win_e;
+pub mod wsl;
 
 pub use windows::core::Error as WinError;

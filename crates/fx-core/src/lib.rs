@@ -22,6 +22,7 @@ pub mod sort;
 pub mod source;
 #[cfg(all(windows, feature = "windows"))]
 pub mod sys;
+pub mod wsl;
 
 pub use folder::{Entry, Folder, RawEntry};
 pub use sort::{SortColumn, SortSpec};

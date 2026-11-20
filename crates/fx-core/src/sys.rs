@@ -102,6 +102,21 @@ impl DirSource for WinSource {
         cancelled: &dyn Fn() -> bool,
         on_entry: &mut dyn FnMut(&RawEntry<'_>),
     ) -> Result<(), SourceError> {
+        // `\\wsl.localhost` : dossier virtuel dont les entrées sont les distributions.
+        if crate::wsl::is_root(path) {
+            for name in fx_win::wsl::distributions() {
+                let wide: Vec<u16> = name.encode_utf16().collect();
+                on_entry(&RawEntry {
+                    name: &wide,
+                    attributes: crate::folder::ATTR_DIRECTORY,
+                    reparse_tag: 0,
+                    size: 0,
+                    created: 0,
+                    modified: 0,
+                });
+            }
+            return Ok(());
+        }
         let method = list_dir(path, &self.options, cancelled, &mut |e| {
             on_entry(&RawEntry {
                 name: e.name,

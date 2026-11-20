@@ -17,7 +17,7 @@ use fx_core::sys::{WinCollator, WinSource};
 use fx_win::context_menu::MenuOptions;
 use fx_win::shell_host::ShellHost;
 use slint::platform::Key;
-use slint::winit_030::winit::event::WindowEvent;
+use slint::winit_030::winit::event::{ElementState, MouseButton, WindowEvent};
 use slint::winit_030::{EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
@@ -133,6 +133,7 @@ enum Cmd {
     DefaultOff,
     Search,
     IndexMft,
+    NewFile,
 }
 
 const COMMANDS: &[(Cmd, &str, &str)] = &[
@@ -157,6 +158,7 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
     ),
     (Cmd::Refresh, "Actualiser", "F5 / Ctrl+R"),
     (Cmd::NewFolder, "Nouveau dossier", "Ctrl+Maj+N"),
+    (Cmd::NewFile, "Nouveau fichier", ""),
     (Cmd::SelectAll, "Tout sélectionner", "Ctrl+A"),
     (Cmd::Rename, "Renommer", "F2"),
     (Cmd::Delete, "Supprimer (corbeille)", "Suppr"),
@@ -329,6 +331,20 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
                     let px = (16.0 * scale_factor).round() as u32;
                     with_app(|a| a.set_icon_px(px));
                 }
+                // Boutons latéraux de la souris : précédent (4) et suivant (5).
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: button @ (MouseButton::Back | MouseButton::Forward),
+                    ..
+                } => {
+                    let back = *button == MouseButton::Back;
+                    with_app(|a| {
+                        let pane = a.active_pane();
+                        if back { pane.go_back() } else { pane.go_forward() }
+                    });
+                }
+                WindowEvent::Focused(true) => with_app(|a| a.update_toolbar()),
+                WindowEvent::Resized(_) => with_app(|a| a.update_window_width()),
                 WindowEvent::RedrawRequested => with_app(|a| a.on_redraw()),
                 _ => {}
             }
@@ -437,6 +453,7 @@ fn wire_callbacks(ui: &MainWindow) {
     });
     ui.on_palette_edited(|q| with_app(|a| a.palette_filter(&q)));
     ui.on_palette_run(|i| with_app(|a| a.palette_run(i)));
+    ui.on_command(|id| with_app(|a| a.toolbar_command(id)));
     ui.on_search_opened(|| with_app(|a| a.search_opened()));
     ui.on_search_edited(|q| with_app(|a| a.search_edited(&q)));
     ui.on_search_run(|i, open| with_app(|a| a.search_run(i, open)));
@@ -484,6 +501,7 @@ impl App {
         theme: Option<slint::winit_030::winit::window::Theme>,
     ) {
         self.hwnd.set(crate::window::hwnd(w));
+        self.update_window_width();
         self.set_icon_px((16.0 * w.scale_factor()).round() as u32);
         let Some(h) = self.hwnd.get() else { return };
         crate::window::apply_style(h, theme, self.mica);
@@ -1237,6 +1255,7 @@ impl App {
             Cmd::ToggleHidden => self.toggle_hidden(),
             Cmd::Refresh => pane.refresh(),
             Cmd::NewFolder => pane.new_folder(),
+            Cmd::NewFile => pane.new_file(),
             Cmd::SelectAll => {
                 pane.model.update_selection(|s, v| s.select_all(v));
                 pane.update_status();
@@ -1511,7 +1530,40 @@ impl App {
 
     /// Met à jour le volet d'aperçu pour la sélection du volet actif, après un court délai
     /// (le défilement au clavier ne déclenche pas un aperçu par ligne).
+    /// Largeur logique de la fenêtre (libellés de la barre d'outils).
+    fn update_window_width(&self) {
+        let w = self.ui.window();
+        let width = w.size().width as f32 / w.scale_factor().max(0.1);
+        self.ui.set_window_width(width);
+    }
+
+    /// État des boutons de la barre d'outils : sélection, presse-papiers, dossier réel.
+    pub(crate) fn update_toolbar(&self) {
+        let pane = self.active_pane();
+        self.ui.set_has_selection(!pane.model.selected().is_empty());
+        self.ui.set_can_create(pane.current_path().is_some());
+        self.ui.set_can_paste(fx_win::clipboard::has_files());
+    }
+
+    /// Commandes de la barre d'outils (numéros de `command` dans app.slint).
+    fn toolbar_command(self: &Rc<Self>, id: i32) {
+        let pane = self.active_pane();
+        pane.ui_focus_list();
+        match id {
+            0 => self.run_cmd(Cmd::NewFolder),
+            1 => self.run_cmd(Cmd::NewFile),
+            2 => pane.clipboard_set(true),
+            3 => pane.clipboard_set(false),
+            4 => pane.paste(),
+            5 => pane.begin_rename(),
+            6 => pane.delete_selection(false),
+            7 => self.run_cmd(Cmd::Properties),
+            _ => {}
+        }
+    }
+
     pub(crate) fn update_preview(self: &Rc<Self>) {
+        self.update_toolbar();
         let seq = self.preview_seq.get() + 1;
         self.preview_seq.set(seq);
         if !self.preview_visible.get() {
@@ -2285,6 +2337,111 @@ impl App {
                         b.report += &line;
                     }
                 }
+                // Barre d'outils : état des boutons puis création d'éléments.
+                self.update_toolbar();
+                self.check(
+                    self.ui.get_can_create(),
+                    "barre d'outils : création possible dans un dossier réel",
+                );
+                self.toolbar_command(0);
+                next(1500, dir);
+            }
+            30 => {
+                // Le nouveau dossier est sélectionné, en renommage, et mis en évidence.
+                let fresh = |name: &str| {
+                    let wanted: Vec<u16> = name.encode_utf16().collect();
+                    p.model.folder().is_some_and(|f| {
+                        p.model.visible().iter().enumerate().any(|(row, &e)| {
+                            f.name(e) == wanted.as_slice()
+                                && slint::Model::row_data(&*p.model, row).is_some_and(|r| r.fresh)
+                        })
+                    })
+                };
+                self.check(
+                    dir.join("Nouveau dossier").is_dir(),
+                    "barre d'outils : « Nouveau dossier » créé sur le disque",
+                );
+                self.check(fresh("Nouveau dossier"), "élément créé mis en évidence");
+                p.rename_commit("Dossier animé");
+                self.toolbar_command(1);
+                next(1500, dir);
+            }
+            31 => {
+                self.check(
+                    dir.join("Nouveau fichier.txt").is_file(),
+                    "barre d'outils : « Nouveau fichier.txt » créé sur le disque",
+                );
+                self.update_toolbar();
+                self.check(
+                    self.ui.get_has_selection(),
+                    "barre d'outils : le nouvel élément est sélectionné",
+                );
+                next(2200, dir);
+            }
+            32 => {
+                // Plus d'élément en évidence : l'animation de fondu est terminée.
+                let any = (0..p.model.len())
+                    .any(|row| slint::Model::row_data(&*p.model, row).is_some_and(|r| r.fresh));
+                self.check(!any, "mise en évidence retirée après ~1,6 s");
+                // WSL : racine « Linux » virtuelle, distribution, dossier parent.
+                if fx_win::wsl::distributions().is_empty() {
+                    slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
+                    return;
+                }
+                p.navigate(PathBuf::from(fx_core::wsl::ROOT), true, Vec::new());
+                next(600, dir);
+            }
+            33 => {
+                let expected = fx_win::wsl::distributions().len();
+                if self.self_test_retry(step, &dir, p.model.len() == expected) {
+                    return;
+                }
+                self.check(
+                    p.model.len() == expected && p.ui_snapshot().error.is_empty(),
+                    &format!(
+                        "WSL : la racine Linux liste les distributions ({} sur {expected})",
+                        p.model.len()
+                    ),
+                );
+                let first = fx_win::wsl::distributions().remove(0);
+                p.navigate(
+                    PathBuf::from(format!(r"{}\{first}", fx_core::wsl::ROOT)),
+                    true,
+                    Vec::new(),
+                );
+                next(1000, dir);
+            }
+            34 => {
+                let ui = p.ui_snapshot();
+                let ready = p.model.len() > 0 && !ui.loading;
+                // Distribution arrêtée : le premier accès démarre la machine virtuelle et peut
+                // dépasser le délai réseau de l'auto-test (2 s) ; on relance, comme avec F5.
+                if !ready && !ui.loading && !ui.error.is_empty() {
+                    p.refresh();
+                }
+                if self.self_test_retry(step, &dir, ready) {
+                    return;
+                }
+                self.check(
+                    p.model.len() > 0 && p.ui_snapshot().error.is_empty(),
+                    &format!(
+                        "WSL : une distribution s'ouvre ({} éléments, sans erreur)",
+                        p.model.len()
+                    ),
+                );
+                p.go_up();
+                next(1000, dir);
+            }
+            35 => {
+                let expected = fx_win::wsl::distributions().len();
+                if self.self_test_retry(step, &dir, p.model.len() == expected) {
+                    return;
+                }
+                let at_root = p.current_path().is_some_and(|c| fx_core::wsl::is_root(&c));
+                self.check(
+                    at_root,
+                    "WSL : « dossier parent » d'une distribution = racine Linux",
+                );
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
             _ => {}

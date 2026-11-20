@@ -72,6 +72,8 @@ pub struct FolderModel {
     grid_cache: RefCell<HashMap<usize, Rc<VecModel<Row>>>>,
     /// Lignes de grille visibles `[début, fin)`, relevées à chaque image.
     visible_lines: Cell<(usize, usize)>,
+    /// Noms des éléments créés à l'instant (mis en évidence par `Row::fresh`).
+    fresh: RefCell<HashSet<Vec<u16>>>,
     /// Éléments de lignes en cache mais hors de l'écran, mis à jour sans demander leur icône :
     /// elle sera demandée quand ils deviendront visibles.
     deferred: RefCell<HashSet<usize>>,
@@ -92,6 +94,7 @@ impl FolderModel {
             grid_cache: RefCell::default(),
             visible_lines: Cell::new((0, 0)),
             deferred: RefCell::default(),
+            fresh: RefCell::default(),
         }
     }
 
@@ -140,6 +143,34 @@ impl FolderModel {
         self.grid_cache.borrow_mut().clear();
         self.notify.reset();
         self.grid_notify.reset();
+    }
+
+    /// Met en évidence les éléments `names` (ou retire la mise en évidence si `on` est faux).
+    pub fn set_fresh(&self, names: &[Vec<u16>], on: bool) {
+        {
+            let mut set = self.fresh.borrow_mut();
+            for n in names {
+                if on {
+                    set.insert(n.clone());
+                } else {
+                    set.remove(n);
+                }
+            }
+        }
+        let rows: Vec<usize> = {
+            let v = self.view.borrow();
+            let Some(folder) = v.folder.as_ref() else { return };
+            names
+                .iter()
+                .filter_map(|n| folder.find(n))
+                .filter_map(|e| v.row_of.get(e as usize).copied())
+                .filter(|&r| r != u32::MAX)
+                .map(|r| r as usize)
+                .collect()
+        };
+        for r in rows {
+            self.row_changed(r);
+        }
     }
 
     pub fn is_grid(&self) -> bool {
@@ -454,6 +485,7 @@ impl FolderModel {
             focused,
             has_icon: icon.is_some(),
             icon: icon.unwrap_or_default(),
+            fresh: self.fresh.borrow().contains(folder.name(index)),
         })
     }
 }

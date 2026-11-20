@@ -1408,6 +1408,30 @@ impl Pane {
         self.run_job(Job::Op(op), "Nouveau dossier");
     }
 
+    pub(crate) fn new_file(self: &Rc<Self>) {
+        let Some(parent) = self.current_path() else { return };
+        {
+            let mut st = self.st.borrow_mut();
+            st.pending_rename = true;
+            st.pending_select.clear();
+        }
+        let op = FileOp::NewFile {
+            parent,
+            name: OsString::from("Nouveau fichier.txt"),
+        };
+        self.run_job(Job::Op(op), "Nouveau fichier");
+    }
+
+    /// Met en évidence `names` pendant ~1,6 s (animation de fondu dans l'interface).
+    pub(crate) fn flash_created(self: &Rc<Self>, names: &[Vec<u16>]) {
+        self.model.set_fresh(names, true);
+        let names = names.to_vec();
+        let id = self.id;
+        slint::Timer::single_shot(Duration::from_millis(1600), move || {
+            with_pane(id, |p| p.model.set_fresh(&names, false));
+        });
+    }
+
     pub(crate) fn clipboard_set(self: &Rc<Self>, cut: bool) {
         let pid = self.id;
         let paths = self.selected_paths();
@@ -1478,6 +1502,7 @@ impl Pane {
                 if names.is_empty() {
                     return;
                 }
+                self.flash_created(&names);
                 {
                     let mut st = self.st.borrow_mut();
                     st.pending_select = names;

@@ -57,6 +57,10 @@ impl History {
 
 /// Dossier parent ; `None` à la racine d'un volume ou d'un partage (`C:\`, `\\serveur\partage`).
 pub fn parent_of(path: &Path) -> Option<PathBuf> {
+    // Racine d'une distribution WSL : le parent est le dossier virtuel « Linux ».
+    if let Some(root) = crate::wsl::parent_of_distro_root(path) {
+        return Some(root);
+    }
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(Path::to_path_buf)
