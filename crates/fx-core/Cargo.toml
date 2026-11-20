@@ -1,0 +1,23 @@
+[package]
+name = "fx-core"
+description = "Modèle métier sans interface : dossier, tri, filtre, navigation, chargement."
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["windows"]
+# Implémentations réelles (listing, collation, noms de type) via fx-win.
+windows = ["dep:fx-win"]
+
+[dependencies]
+fx-win = { workspace = true, optional = true }
+rayon.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
