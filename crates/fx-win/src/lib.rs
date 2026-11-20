@@ -15,6 +15,7 @@ pub mod dragdrop;
 pub mod dwm;
 pub mod fileop;
 mod handle;
+pub mod hotkey;
 pub mod icons;
 pub mod listing;
 pub mod locale;

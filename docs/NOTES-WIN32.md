@@ -379,3 +379,40 @@ reproduire.
   `ShellExecute` sans verbe sur un dossier ou un lecteur lancent bien `explorermev.exe` avec
   l'argument `"<dossier>\."`, sans ouvrir de fenêtre de l'Explorateur. La touche Win+E n'a pas
   été essayée (frappe simulée exclue).
+
+## Évolutions d'interface après la phase 6
+
+- **Win+E sur Windows 11 26H2 (build 26300)** : la commande `opennewwindow` de
+  `HKCU\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}` est bien posée mais n'est pas
+  consultée par le raccourci : Win+E est traité dans `explorer.exe`. Le verbe `open` de `Directory` et
+  `Drive`, lui, fonctionne (vérifié). Solution : capture du clavier. Détails de l'agent
+  (`WH_KEYBOARD_LL`) : ne réagir qu'à Win+E sans autre modificateur et ignorer les touches injectées
+  (`LLKHF_INJECTED`) ; lancer le programme **avant** d'avaler la touche et, en cas d'échec, laisser
+  passer ; envoyer une touche neutre (`VK 0xE8`) pour que le relâchement de la touche Windows
+  n'ouvre pas le menu Démarrer ; ignorer la répétition automatique de E ; une instance (mutex) ;
+  arrêt par `WM_CLOSE` sur une fenêtre « message-only ». Windows retire le crochet si le processus
+  s'arrête, et supprime un crochet dont l'appel dure trop longtemps. **Effet réel non observé.**
+- **Palette de Slint** : `Palette.color-scheme` est modifiable (clair/sombre forcés pour les widgets
+  standard) ; `Palette.accent-background` est en lecture seule. L'application utilise donc sa propre
+  couleur d'accent (`Theme.accent`).
+- **Boucles de liaison Slint** : lire `root.width` de la fenêtre pour afficher ou non les libellés de la
+  barre d'outils crée une boucle (la largeur découle de la mise en page) ; la largeur est fournie par
+  Rust (`WindowEvent::Resized`). De même, une colonne qui s'étire d'après la largeur du volet exige de
+  fixer `x` sur le `HorizontalLayout` de l'en-tête. Un élément caché (`visible: false`) garde sa
+  largeur minimale dans un `HorizontalLayout` : le second volet laissait ~160 px vides à droite.
+- **Boutons latéraux de la souris** : `WindowEvent::MouseInput` de winit avec `MouseButton::Back` et
+  `Forward`, reçu par le crochet d'événements avant Slint.
+- **`\\wsl.localhost`** : la racine n'est pas ouvrable comme un dossier (`CreateFileW` sur
+  `\\?\UNC\wsl.localhost\` : ERROR_BAD_PATHNAME, `0x800700A1`). Les distributions se lisent dans
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` (valeur `DistributionName` de chaque sous-clé),
+  sans démarrer WSL. À l'intérieur d'une distribution, `IdExtdDirectoryInfo` n'est pas pris en
+  charge (`0x80070032`) ; le repli sur `FullDirectoryInfo` fonctionne (178 entrées dans `/etc`).
+  Le premier accès à une distribution arrêtée dépasse parfois 2 s (machine virtuelle).
+- **Éléments récents** : `%APPDATA%\Microsoft\Windows\Recent\*.lnk` ; la cible se lit par
+  `IShellLinkW::GetPath` (sans résolution, `SLGP_RAWPATH`) après `IPersistFile::Load` : la cible n'est
+  pas ouverte. 40 éléments en ~0,8 s (thread COM).
+- **Icônes de la page d'accueil** : une icône de dossier demandée avec un nom vide
+  (`SHGetFileInfoW`, `SHGFI_USEFILEATTRIBUTES`) donne une icône générique (disque avec avertissement) :
+  il faut un nom type. Les dossiers connus et lecteurs prennent leur propre icône
+  (`IShellItemImageFactory`), sauf `\\wsl…` (démarrerait la machine virtuelle).
+

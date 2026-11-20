@@ -1374,7 +1374,8 @@ impl App {
                             "Explorateur par défaut",
                             &format!(
                                 "ExplorerMev s'ouvrira à la place de l'Explorateur de fichiers :\n\
-                                 • la touche Windows+E ;\n\
+                                 • la touche Windows+E (un petit agent, lancé à l'ouverture de \
+                                 session, intercepte la combinaison) ;\n\
                                  • les dossiers et lecteurs ouverts depuis un autre programme, \
                                  Win+R ou le menu Démarrer.\n\n\
                                  Cela ne vaut que pour votre compte. La barre des tâches, le bureau \
@@ -1393,15 +1394,23 @@ impl App {
                             return;
                         }
                         match key.enable(&exe) {
-                            Ok(()) => "ExplorerMev est maintenant l'explorateur par défaut (Win+E et dossiers)."
-                                .to_string(),
+                            Ok(()) => {
+                                // Agent Win+E : lancé tout de suite (puis à chaque ouverture de session).
+                                if !fx_win::hotkey::is_agent_running() {
+                                    let _ = std::process::Command::new(&exe).arg("--hotkey-agent").spawn();
+                                }
+                                "ExplorerMev est maintenant l'explorateur par défaut (Win+E et dossiers)."
+                                    .to_string()
+                            }
                             Err(e) => e.to_string(),
                         }
                     }
                 }
             } else {
+                let agent = fx_win::hotkey::stop_agent();
                 match key.disable() {
                     Ok(true) => "L'Explorateur Windows est de nouveau l'explorateur par défaut.".to_string(),
+                    Ok(false) if agent => "L'agent de raccourci Win+E est arrêté.".to_string(),
                     Ok(false) => "ExplorerMev n'était pas l'explorateur par défaut : rien à changer.".to_string(),
                     Err(e) => format!("Registre : {}", e.message()),
                 }

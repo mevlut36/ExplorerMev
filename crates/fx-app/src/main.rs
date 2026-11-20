@@ -159,6 +159,36 @@ fn parse_args() -> anyhow::Result<Args> {
     Ok(a)
 }
 
+/// Agent résident : Win+E ouvre ExplorerMev (une seule instance, arrêt par `--default-explorer off`).
+fn hotkey_agent() -> ExitCode {
+    fn open_window() -> bool {
+        match fx_win::process::launch_path().and_then(|exe| std::process::Command::new(exe).spawn()) {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("Win+E : lancement impossible : {e}");
+                false
+            }
+        }
+    }
+    match fx_win::hotkey::run_agent(open_window) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("agent de raccourci : {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Lance l'agent de raccourci (il tourne déjà : sans effet, l'instance unique est gardée).
+fn start_hotkey_agent(exe: &std::path::Path) {
+    if fx_win::hotkey::is_agent_running() {
+        return;
+    }
+    if let Err(e) = std::process::Command::new(exe).arg("--hotkey-agent").spawn() {
+        eprintln!("agent de raccourci non lancé : {e}");
+    }
+}
+
 /// Dans un paquet MSIX qui isole le registre, les clés écrites ne seraient jamais vues par
 /// l'Explorateur : on refuse plutôt que de réussir sans effet.
 fn refuse_if_registry_virtualized() -> Option<ExitCode> {
@@ -185,10 +215,12 @@ fn default_explorer(action: &str) -> ExitCode {
             "on" => {
                 let exe = fx_win::process::launch_path()?;
                 key.enable(&exe)?;
+                start_hotkey_agent(&exe);
                 format!("ExplorerMev est l'explorateur par défaut : {}", exe.display())
             }
             "off" => {
-                if key.disable()? {
+                let agent = fx_win::hotkey::stop_agent();
+                if key.disable()? || agent {
                     "L'Explorateur Windows est de nouveau l'explorateur par défaut.".into()
                 } else {
                     "ExplorerMev n'était pas l'explorateur par défaut : rien à changer.".into()
@@ -316,6 +348,10 @@ fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.first().map(String::as_str) == Some("--index-helper") {
         return helper::run(&raw[1..]);
+    }
+    // Agent de raccourci Win+E : aucun autre traitement (ni configuration, ni interface).
+    if raw.first().map(String::as_str) == Some("--hotkey-agent") {
+        return hotkey_agent();
     }
     let main_start = Instant::now();
     let args = match parse_args() {

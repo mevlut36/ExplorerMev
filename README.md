@@ -3,7 +3,7 @@
 Explorateur de fichiers pour Windows 11, écrit en Rust, conçu pour être nettement plus rapide et
 plus léger que l'Explorateur Windows.
 
-> **État : phase 6 terminée (distribution).** Navigation, icônes, sélection multiple,
+> **État : phase 6 terminée (distribution), puis évolutions d'interface.** Navigation, icônes, sélection multiple,
 > renommage, corbeille, presse-papiers, menu contextuel natif, glisser-déposer,
 > rafraîchissement automatique, partages réseau annulables, état OneDrive ; onglets avec
 > restauration de session, double volet, vue icônes avec vignettes, volet d'aperçu (texte,
@@ -85,6 +85,10 @@ target\release\explorermev.exe --help
 | Alt+P | Volet d'aperçu |
 | Ctrl+Maj+P | Palette de commandes (toutes les commandes, avec recherche) |
 | Ctrl+Maj+F | Rechercher sur l'ordinateur ; Entrée affiche l'élément dans son dossier, Ctrl+Entrée l'ouvre |
+| Alt+Origine | Page d'accueil |
+| Boutons latéraux de la souris (4 et 5) | Dossier précédent / suivant |
+| Barre d'outils | Nouveau dossier ou fichier, couper, copier, coller, renommer, supprimer, propriétés |
+| Bouton Apparence | Mode clair, sombre ou système ; huit couleurs d'accent ; fond teinté |
 | Ctrl+Maj+S | Calculer la taille des dossiers sélectionnés (en arrière-plan) |
 | Ctrl+D | Ajouter aux favoris (volet de navigation) |
 | Ctrl+Maj+C | Copier le chemin d'accès |
@@ -99,14 +103,33 @@ journal, affichage des nouveaux volets (`view = "details"` ou `"icons"`), indexa
 MFT (`index_mft`, désactivée par défaut). Une valeur invalide est ignorée avec un avertissement ; un fichier illisible n'est
 jamais écrasé. Les options de la ligne de commande sont prioritaires (`explorermev --help`).
 
-Les onglets (et leur double volet) sont restaurés au lancement sans dossier en argument
-(`%APPDATA%\ExplorerMev\session.txt`) ; les favoris sont dans `%APPDATA%\ExplorerMev\favoris.txt`.
+**Page d'accueil** : sans dossier en argument, ExplorerMev s'ouvre sur l'accueil (aussi : volet de
+gauche, Alt+Origine, palette) : cartes d'**accès rapide** (dossiers connus, lecteurs, distributions
+Linux), éléments **épinglés** et **fichiers récents** de Windows (leur contenu n'est jamais lu : rien
+n'est téléchargé depuis OneDrive). L'étoile d'un élément l'épingle : il rejoint les favoris et
+apparaît aussi dans le volet de gauche (dossiers ou fichiers ; `Ctrl+D` épingle l'élément sélectionné).
+Pour reprendre les onglets de la dernière session à la place, régler `startup = "session"` dans
+`config.toml` (`%APPDATA%\ExplorerMev\session.txt`). Les favoris sont dans
+`%APPDATA%\ExplorerMev\favoris.txt`.
+
+**Apparence** : bouton « Apparence » (ou palette) : mode système, clair ou sombre, huit couleurs d'accent
+(bleu, rose, vert, violet, orange, rouge, turquoise, gris) et « fond teinté » qui colore toute la
+fenêtre. Les choix sont mémorisés dans `%APPDATA%\ExplorerMev\apparence.txt`. Les filets de focus des
+champs de saisie gardent la couleur d'accent de Windows (Slint ne permet pas de la remplacer).
+
+**Linux (WSL)** : le volet de gauche liste les distributions installées (lues dans le registre, sans
+démarrer WSL) ; `\\wsl.localhost` est un dossier virtuel « Linux ». Le premier accès à une distribution
+arrêtée démarre sa machine virtuelle (2 à 3 s).
 
 **Explorateur par défaut** (désactivé par défaut) : commande « Utiliser ExplorerMev comme explorateur
 par défaut… » de la palette (Ctrl+Maj+P), qui demande confirmation, ou `explorermev --default-explorer on`.
 Pour votre compte seulement, ExplorerMev s'ouvre alors :
 
-- avec la touche **Windows+E** ;
+- avec la touche **Windows+E** : sur les versions récentes de Windows 11, ce raccourci est traité par
+  `explorer.exe` lui-même (la commande du Registre n'est pas consultée). Un **petit agent résident**
+  (`explorermev --hotkey-agent`, lancé à l'ouverture de session par la clé `Run` de
+  votre compte) intercepte Win+E, et seulement elle, et ouvre ExplorerMev ; si le lancement échoue le
+  raccourci reste à Windows. `--default-explorer off` l'arrête et retire son démarrage automatique ;
 - quand un **dossier ou un lecteur** est ouvert depuis un autre programme, avec Win+R ou depuis le
   menu Démarrer (verbe `open` des classes `Directory` et `Drive`).
 
@@ -168,6 +191,10 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
 - **OneDrive** : jamais de lecture, de vignette ni d'aperçu d'un fichier « en ligne seulement »,
   par construction ; non vérifié sur des fichiers réels de ce type (aucun sur la machine de
   développement).
+- **Win+E (agent de raccourci)** : l'agent démarre, est à instance unique et s'arrête sur demande dans le
+  code et ses tests (décision pure testée) ; l'interception d'une vraie frappe Win+E **n'a pas été
+  observée** (l'exécution de l'agent m'a été refusée par le système de permissions, et je ne simule
+  aucune frappe). Idem pour les boutons latéraux de la souris.
 - **Aperçu** : texte, images et PDF vérifiés ; les documents Office dépendent des
   prévisualiseurs installés (non testés).
 - **Recherche** : volumes NTFS fixes seulement ; un fichier à liens physiques n'est indexé que
@@ -201,7 +228,7 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
   [0002 Listing](docs/adr/0002-methode-listing.md) ·
   [0003 Index](docs/adr/0003-strategie-index.md) ·
   [0004 Panics](docs/adr/0004-strategie-panic.md)
-- Mesures : [phase 0](docs/mesures/phase0-prototype.md) · [phase 1](docs/mesures/phase1.md) · [phase 2](docs/mesures/phase2.md) · [phase 3](docs/mesures/phase3.md) · [phase 4](docs/mesures/phase4.md) · [phase 5](docs/mesures/phase5.md) · [phase 6](docs/mesures/phase6.md)
+- Mesures : [phase 0](docs/mesures/phase0-prototype.md) · [phase 1](docs/mesures/phase1.md) · [phase 2](docs/mesures/phase2.md) · [phase 3](docs/mesures/phase3.md) · [phase 4](docs/mesures/phase4.md) · [phase 5](docs/mesures/phase5.md) · [phase 6](docs/mesures/phase6.md) · [évolutions](docs/mesures/evolutions.md)
 - [Notes Win32](docs/NOTES-WIN32.md)
 
 ## Développement

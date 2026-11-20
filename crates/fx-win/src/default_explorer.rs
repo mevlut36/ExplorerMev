@@ -26,6 +26,10 @@ use crate::win_e::{
 const CLASSES: [&str; 2] = ["Directory", "Drive"];
 /// Marqueur posé sur la clé `open` créée par ExplorerMev (valeur = chemin du programme).
 const MARKER: &str = "ExplorerMev";
+/// Nom de la valeur de démarrage automatique (clé `Run`) qui lance l'agent de raccourci.
+const RUN_VALUE: &str = "ExplorerMev-Win+E";
+/// Clé `Run` réelle de l'utilisateur.
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// Verbe par défaut qu'ExplorerMev écrit sur `<classe>\shell`.
 const DEFAULT_VERB: &str = "open";
 
@@ -46,12 +50,15 @@ pub enum DefaultState {
 #[derive(Clone, Debug)]
 pub struct DefaultExplorer {
     base: String,
+    /// Clé `Run` (la vraie en usage normal, une clé de test sinon).
+    run_key: String,
 }
 
 impl Default for DefaultExplorer {
     fn default() -> Self {
         Self {
             base: r"Software\Classes".into(),
+            run_key: RUN_KEY.into(),
         }
     }
 }
@@ -59,7 +66,22 @@ impl Default for DefaultExplorer {
 impl DefaultExplorer {
     /// Clé de test sous `HKCU\<base>` (à supprimer avec [`DefaultExplorer::delete_base`]).
     pub fn with_base(base: impl Into<String>) -> Self {
-        Self { base: base.into() }
+        let base = base.into();
+        Self {
+            run_key: format!(r"{base}\Run"),
+            base,
+        }
+    }
+
+    /// Démarrage automatique de l'agent de raccourci : présent ou non.
+    fn run_state(&self) -> windows::core::Result<WinEState> {
+        let Some(key) = WinEKey::open(&self.run_key)? else {
+            return Ok(WinEState::Default);
+        };
+        Ok(match WinEKey::read(&key, RUN_VALUE)? {
+            Some(cmd) if !cmd.trim().is_empty() => WinEState::ExplorerMev(PathBuf::from(unquote(&cmd))),
+            _ => WinEState::Default,
+        })
     }
 
     fn win_e(&self) -> WinEKey {
@@ -104,7 +126,7 @@ impl DefaultExplorer {
 
     /// État de l'option : Win+E et chaque classe de dossiers.
     pub fn state(&self) -> windows::core::Result<DefaultState> {
-        let mut parts = vec![self.win_e().state()?];
+        let mut parts = vec![self.win_e().state()?, self.run_state()?];
         for class in CLASSES {
             parts.push(self.class_state(class)?);
         }
@@ -156,12 +178,21 @@ impl DefaultExplorer {
             // Sans cela, un DelegateExecute hérité de la classe parente l'emporterait.
             set_string(&command, "DelegateExecute", "")?;
         }
+        // Agent de raccourci Win+E : lancé à l'ouverture de session.
+        let run = create_key(&self.run_key)?;
+        set_string(&run, RUN_VALUE, &format!("\"{exe_text}\" --hotkey-agent"))?;
         self.win_e().enable(exe)
     }
 
     /// Rend l'Explorateur aux deux emplacements. `true` si quelque chose a été retiré.
     pub fn disable(&self) -> windows::core::Result<bool> {
         let mut changed = self.win_e().disable()?;
+        if matches!(self.run_state()?, WinEState::ExplorerMev(_))
+            && let Some(run) = writable(&self.run_key)?
+        {
+            delete_value(&run, RUN_VALUE)?;
+            changed = true;
+        }
         for class in CLASSES {
             if !matches!(self.class_state(class)?, WinEState::ExplorerMev(_)) {
                 continue;
@@ -249,12 +280,23 @@ mod tests {
                 let cmd = read_default(&format!(r"{}\command", d.open_key(class))).ok_or("commande")?;
                 assert_eq!(cmd, r#""C:\Outils\ExplorerMev\explorermev.exe" "%1\.""#);
             }
+            // Agent de raccourci Win+E : démarrage automatique posé dans la clé Run (de test).
+            let run = WinEKey::open(&d.run_key)?.ok_or("clé Run")?;
+            assert_eq!(
+                WinEKey::read(&run, RUN_VALUE)?.as_deref(),
+                Some(r#""C:\Outils\ExplorerMev\explorermev.exe" --hotkey-agent"#)
+            );
             // Réactiver (mise à jour du chemin) est permis.
             let moved = Path::new(r"D:\ExplorerMev\explorermev.exe");
             d.enable(moved)?;
             assert_eq!(d.state()?, DefaultState::ExplorerMev(moved.to_path_buf()));
 
             assert!(d.disable()?);
+            let run = WinEKey::open(&d.run_key)?;
+            assert!(
+                run.is_none_or(|k| WinEKey::read(&k, RUN_VALUE).ok().flatten().is_none()),
+                "démarrage automatique retiré"
+            );
             assert_eq!(d.state()?, DefaultState::Windows);
             for class in CLASSES {
                 assert!(WinEKey::open(&d.open_key(class))?.is_none(), "verbe open retiré");

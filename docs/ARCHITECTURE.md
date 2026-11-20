@@ -72,6 +72,8 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 | `fx-watch` (un par dossier affiché) | `ReadDirectoryChangesW`, regroupement, lecture des entrées modifiées |
 | `fx-shell` (hôte Shell, STA OLE + fenêtre cachée) | menu contextuel, presse-papiers (propriétaire), ouverture de fichiers |
 | `fx-icon-0`, `fx-icon-1` (STA) | icônes et vignettes des éléments affichés |
+| `fx-home` (à l'affichage de l'accueil) | icônes et fichiers récents (raccourcis `.lnk` lus sans ouvrir les cibles), COM STA |
+| processus `explorermev --hotkey-agent` (si l'option « explorateur par défaut » est active) | crochet clavier bas niveau : Win+E ouvre ExplorerMev ; instance unique ; lancé par la clé `Run` de l'utilisateur |
 | `fx-search` (dès la première recherche) | possède les index de recherche : requêtes (seule la plus récente est exécutée, balayage parallèle `rayon`), changements, cache, libération après 5 min d'inactivité |
 | `fx-search-build` + pool `fx-index-N` (priorité arrière-plan, moitié des cœurs) | construction d'un index par parcours des dossiers |
 | `fx-watch-tree` (un par volume indexé) | surveillance récursive de la racine du volume (noms et attributs) |
