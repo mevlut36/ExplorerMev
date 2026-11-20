@@ -220,3 +220,30 @@ reproduire.
   par PowerShell.
 - PowerShell : `… | Select-Object -First 1` interrompt le processus et laisse `$LASTEXITCODE` à
   255 ; ce n'est pas le code de sortie de l'application.
+
+## Phase 4
+
+- **Prévisualiseurs (`IPreviewHandler`)** : le CLSID se trouve par
+  `AssocQueryStringW(ASSOCSTR_SHELLEXTENSION, ".ext", "{8895b1c6-b41f-4c1c-a562-0d564250836f}")`
+  (avec `ASSOCF_INIT_DEFAULTTOSTAR`). L'initialisation essaie, dans l'ordre,
+  `IInitializeWithFile`, `IInitializeWithItem`, `IInitializeWithStream` : chaque prévisualiseur
+  n'en implémente qu'une partie. `CLSCTX_LOCAL_SERVER` est accepté en premier : le
+  prévisualiseur PDF d'Edge (`{3A84F9C2-…}`) tourne alors hors processus, et un plantage ne
+  touche pas WinDir.
+- La fenêtre enfant qui héberge l'aperçu est créée **par le thread STA de l'hôte d'aperçu**,
+  pas par le thread d'interface : un prévisualiseur lent ne bloque pas l'interface (latence
+  maximale mesurée pendant l'auto-test : 6,4 ms). Une fenêtre enfant d'un autre thread relie
+  les files d'entrée des deux threads ; aucun appel synchrone n'est fait du thread d'interface
+  vers la fenêtre enfant.
+- Les éléments Slint dessinés par-dessus la zone d'aperçu (palette, suggestions) sont masqués
+  par la fenêtre enfant, qui est une vraie fenêtre Win32 au-dessus de la surface de rendu.
+- `PrintWindow(PW_RENDERFULLCONTENT)` ne capture pas le contenu d'un prévisualiseur hors
+  processus (zone grise) ; une capture de l'écran le montre bien. Il faut ~1 s au
+  prévisualiseur PDF d'Edge pour son premier rendu.
+- Vignettes : `IShellItemImageFactory::GetImage` avec `SIIGBF_THUMBNAILONLY` évite de recevoir
+  une icône à la place d'une vignette ; `SIIGBF_INCACHEONLY` ne lit que le cache du Shell. Un
+  fichier « en ligne seulement » n'est jamais présenté au Shell pour un aperçu (il serait
+  téléchargé).
+- Saisie au clavier : deux touches à moins d'une seconde d'intervalle forment une seule
+  recherche (« a » puis « i » cherche « ai »), comme dans l'Explorateur ; l'auto-test réinitialise
+  la saisie entre deux sélections.

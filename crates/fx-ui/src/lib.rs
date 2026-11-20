@@ -25,6 +25,7 @@ mod model;
 mod nav;
 mod ops;
 mod pane;
+mod preview;
 mod window;
 
 use std::path::PathBuf;

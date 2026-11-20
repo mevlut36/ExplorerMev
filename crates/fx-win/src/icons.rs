@@ -37,6 +37,14 @@ pub struct IconImage {
 
 /// Lit un HBITMAP en BGRA 32 bits de haut en bas.
 fn bitmap_bgra(hbm: HBITMAP) -> Option<(u32, u32, Vec<u8>)> {
+    bitmap_bgra_limit(hbm, 1024)
+}
+
+fn bitmap_bgra_any(hbm: HBITMAP) -> Option<(u32, u32, Vec<u8>)> {
+    bitmap_bgra_limit(hbm, 4096)
+}
+
+fn bitmap_bgra_limit(hbm: HBITMAP, limit: i32) -> Option<(u32, u32, Vec<u8>)> {
     let mut bm = BITMAP::default();
     // SAFETY: `bm` est une structure BITMAP locale de taille transmise ; le DC mémoire est
     // détruit en fin de bloc ; le tampon fait exactement w × h × 4 octets, ce qu'annonce bmi.
@@ -50,7 +58,7 @@ fn bitmap_bgra(hbm: HBITMAP) -> Option<(u32, u32, Vec<u8>)> {
             return None;
         }
         let (w, h) = (bm.bmWidth, bm.bmHeight.abs());
-        if w <= 0 || h <= 0 || w > 1024 || h > 1024 {
+        if w <= 0 || h <= 0 || w > limit || h > limit {
             return None;
         }
         let mut bmi = BITMAPINFO {
@@ -184,6 +192,36 @@ pub fn item_icon(path: &Path, size: u32) -> Option<IconImage> {
         let _ = DeleteObject(HGDIOBJ(hbm.0));
         let (w, h, px) = px?;
         // Les bitmaps de IShellItemImageFactory sont en alpha prémultiplié.
+        Some(bgra_to_rgba(w, h, px, true))
+    }
+}
+
+/// Vignette (miniature) d'un fichier rendue par le Shell (images, PDF, vidéos… selon les
+/// fournisseurs installés), d'au plus `size` pixels. `cache_only` : seulement si elle est déjà
+/// dans le cache de miniatures de Windows (aucune lecture du fichier).
+pub fn thumbnail(path: &Path, size: u32, cache_only: bool) -> Option<IconImage> {
+    use windows::Win32::UI::Shell::{SIIGBF_INCACHEONLY, SIIGBF_THUMBNAILONLY};
+    let wide = shell_path(path);
+    let mut flags = SIIGBF_THUMBNAILONLY;
+    if cache_only {
+        flags |= SIIGBF_INCACHEONLY;
+    }
+    // SAFETY: voir `item_icon`.
+    unsafe {
+        let factory: IShellItemImageFactory =
+            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+        let hbm = factory
+            .GetImage(
+                SIZE {
+                    cx: size as i32,
+                    cy: size as i32,
+                },
+                flags,
+            )
+            .ok()?;
+        let px = bitmap_bgra_any(hbm);
+        let _ = DeleteObject(HGDIOBJ(hbm.0));
+        let (w, h, px) = px?;
         Some(bgra_to_rgba(w, h, px, true))
     }
 }

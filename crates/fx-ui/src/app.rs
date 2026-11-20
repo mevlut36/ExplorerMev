@@ -182,6 +182,9 @@ pub(crate) struct App {
     palette: RefCell<Vec<Cmd>>,
     preview_visible: Cell<bool>,
     preview_seq: Cell<u64>,
+    preview_host: RefCell<Option<ShellHost>>,
+    preview_native: Cell<bool>,
+    preview_last_rect: Cell<fx_win::preview::Rect>,
     drop_reg: RefCell<Option<fx_win::dragdrop::DropRegistration>>,
     drop_pane: Cell<Option<u64>>,
     frames: Cell<u64>,
@@ -239,6 +242,9 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         palette: RefCell::default(),
         preview_visible: Cell::new(false),
         preview_seq: Cell::new(0),
+        preview_host: RefCell::new(None),
+        preview_native: Cell::new(false),
+        preview_last_rect: Cell::new(fx_win::preview::Rect::default()),
         drop_reg: RefCell::new(None),
         drop_pane: Cell::new(None),
         frames: Cell::new(0),
@@ -545,6 +551,7 @@ impl App {
             return;
         }
         let old = self.active_tab();
+        self.close_native_preview();
         if self.active_tab.get() != index || old.panes[0].slot.get().is_none() {
             for p in &old.panes {
                 p.unbind();
@@ -1183,17 +1190,180 @@ impl App {
         self.update_preview();
     }
 
-    /// Met à jour le volet d'aperçu pour la sélection du volet actif (phase 4, étape 3).
+    /// Met à jour le volet d'aperçu pour la sélection du volet actif, après un court délai
+    /// (le défilement au clavier ne déclenche pas un aperçu par ligne).
     pub(crate) fn update_preview(self: &Rc<Self>) {
-        if !self.preview_visible.get() {
-            return;
-        }
         let seq = self.preview_seq.get() + 1;
         self.preview_seq.set(seq);
+        if !self.preview_visible.get() {
+            self.close_native_preview();
+            return;
+        }
+        slint::Timer::single_shot(Duration::from_millis(120), move || {
+            with_app(|a| {
+                if a.preview_seq.get() == seq {
+                    a.show_preview(seq);
+                }
+            })
+        });
+    }
+
+    fn preview_message(&self, title: String, text: &str) {
         self.ui.set_preview_kind(0);
-        self.ui.set_preview_title(SharedString::new());
-        self.ui
-            .set_preview_text("Sélectionnez un fichier pour en afficher l'aperçu.".into());
+        self.ui.set_preview_title(title.into());
+        self.ui.set_preview_text(text.into());
+    }
+
+    fn preview_host(&self) -> bool {
+        if self.preview_host.borrow().is_none() {
+            match ShellHost::start("fx-preview") {
+                Ok(h) => *self.preview_host.borrow_mut() = Some(h),
+                Err(e) => {
+                    tracing::warn!("hôte d'aperçu indisponible : {e}");
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn preview_post(&self, job: impl FnOnce(&fx_win::shell_host::HostCtx) + Send + 'static) -> bool {
+        self.preview_host() && self.preview_host.borrow().as_ref().is_some_and(|h| h.post(job))
+    }
+
+    fn close_native_preview(&self) {
+        if self.preview_native.replace(false) {
+            self.preview_post(|_| crate::preview::close_native());
+        }
+    }
+
+    /// Rectangle de la zone d'aperçu, en pixels physiques de la zone client.
+    fn preview_rect(&self) -> fx_win::preview::Rect {
+        let s = self.ui.window().scale_factor();
+        fx_win::preview::Rect {
+            x: (self.ui.get_preview_x() * s).round() as i32,
+            y: (self.ui.get_preview_y() * s).round() as i32,
+            width: (self.ui.get_preview_width() * s).round() as i32,
+            height: (self.ui.get_preview_height() * s).round() as i32,
+        }
+    }
+
+    fn show_preview(self: &Rc<Self>, seq: u64) {
+        self.close_native_preview();
+        let pane = self.active_pane();
+        let Some(folder) = pane.model.folder() else {
+            self.preview_message(String::new(), "");
+            return;
+        };
+        let sel = pane.model.selected();
+        let [entry] = sel[..] else {
+            let text = if sel.is_empty() {
+                "Sélectionnez un fichier pour en afficher l'aperçu.".to_string()
+            } else {
+                format!("{} éléments sélectionnés", sel.len())
+            };
+            self.preview_message(String::new(), &text);
+            return;
+        };
+        let Some(e) = folder.entry(entry).copied() else {
+            return;
+        };
+        let name = folder.display_name(entry);
+        let path = folder.child_path(entry);
+        if e.is_dir() {
+            self.preview_message(name, "Dossier");
+            return;
+        }
+        // Jamais de lecture d'un fichier OneDrive « en ligne seulement » : elle le téléchargerait.
+        if e.is_cloud_online_only() {
+            self.preview_message(
+                name,
+                "Fichier disponible en ligne seulement : aperçu non téléchargé.",
+            );
+            return;
+        }
+        let ext = String::from_utf16_lossy(&fx_core::folder::extension_key(folder.name(entry)));
+        self.preview_message(name.clone(), "Chargement de l'aperçu…");
+        if crate::preview::TEXT_EXTS.contains(&ext.as_str()) {
+            let _ = std::thread::Builder::new()
+                .name("fx-preview-text".into())
+                .spawn(move || {
+                    let text = crate::preview::read_text(&path);
+                    post(move |a| {
+                        if a.preview_seq.get() != seq {
+                            return;
+                        }
+                        match text {
+                            Some(t) => {
+                                a.ui.set_preview_kind(1);
+                                a.ui.set_preview_text(t.into());
+                            }
+                            None => a.preview_message(name, "Fichier binaire : pas d'aperçu texte."),
+                        }
+                    });
+                });
+            return;
+        }
+        let image = crate::preview::IMAGE_EXTS.contains(&ext.as_str());
+        let parent = self.hwnd.get().unwrap_or(0);
+        let rect = self.preview_rect();
+        let px = (rect.width.max(rect.height)).clamp(64, 1024) as u32;
+        let ok = self.preview_post(move |_| {
+            // Prévisualiseur natif pour les documents ; vignette du Shell pour les images et à
+            // défaut.
+            let native = if image {
+                Ok(false)
+            } else {
+                crate::preview::open_native(parent, rect, &path, &ext)
+            };
+            let outcome = match native {
+                Ok(true) => Ok(None),
+                Ok(false) | Err(_) => match fx_win::icons::thumbnail(&path, px, false) {
+                    Some(img) => Ok(Some(img)),
+                    None => Err(native
+                        .err()
+                        .unwrap_or_else(|| "Aucun aperçu disponible pour ce type de fichier.".into())),
+                },
+            };
+            post(move |a| {
+                if a.preview_seq.get() != seq {
+                    // Sélection changée entre-temps : on ferme ce qui vient d'être ouvert.
+                    a.preview_native.set(true);
+                    a.close_native_preview();
+                    return;
+                }
+                match outcome {
+                    Ok(None) => {
+                        a.preview_native.set(true);
+                        a.preview_last_rect.set(rect);
+                        a.ui.set_preview_kind(3);
+                    }
+                    Ok(Some(img)) => {
+                        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                            &img.rgba, img.width, img.height,
+                        );
+                        a.ui.set_preview_image(slint::Image::from_rgba8(buf));
+                        a.ui.set_preview_kind(2);
+                    }
+                    Err(msg) => a.preview_message(name, &msg),
+                }
+            });
+        });
+        if !ok {
+            self.preview_message(String::new(), "Aperçu indisponible.");
+        }
+    }
+
+    /// Fenêtre d'aperçu natif : suit les changements de mise en page (appelé à chaque image).
+    fn follow_native_preview(&self) {
+        if !self.preview_native.get() {
+            return;
+        }
+        let rect = self.preview_rect();
+        if rect != self.preview_last_rect.get() {
+            self.preview_last_rect.set(rect);
+            self.preview_post(move |_| crate::preview::resize_native(rect));
+        }
     }
 
     // ------------------------------------------------------------------ instrumentation
@@ -1203,6 +1373,7 @@ impl App {
         if let Some(run) = self.scroll.borrow_mut().as_mut() {
             run.frames.push(Instant::now());
         }
+        self.follow_native_preview();
         if self.frames.get() == 1 {
             let at = fx_win::process::ms_since_process_start();
             slint::Timer::single_shot(Duration::ZERO, move || {
@@ -1540,6 +1711,64 @@ impl App {
                     n == 2 && dual,
                     &format!("Ctrl+Maj+T : onglet rouvert, double volet conservé ({n} onglets)"),
                 );
+                // Volet d'aperçu : texte, image, document (prévisualiseur du Shell).
+                let _ = std::fs::write(dir.join("image.bmp"), test_bmp(96, 64));
+                let _ = std::fs::write(dir.join("rapport.pdf"), test_pdf());
+                self.toggle_preview();
+                p.navigate(dir.clone(), true, Vec::new());
+                next(1000, dir);
+            }
+            17 => {
+                p.on_key("a", false, false, false);
+                next(600, dir);
+            }
+            18 => {
+                let kind = self.ui.get_preview_kind();
+                let text = self.ui.get_preview_text();
+                self.check(
+                    kind == 1 && text.starts_with("xxx"),
+                    &format!("aperçu texte (type {kind}, {} caractères)", text.chars().count()),
+                );
+                // Nouvelle saisie (pas la suite de la précédente).
+                *p.type_ahead.borrow_mut() = fx_core::selection::TypeAhead::default();
+                p.on_key("i", false, false, false);
+                next(1500, dir);
+            }
+            19 => {
+                let kind = self.ui.get_preview_kind();
+                let size = self.ui.get_preview_image().size();
+                self.check(
+                    kind == 2 && size.width > 0,
+                    &format!(
+                        "aperçu image : vignette du Shell (type {kind}, {}×{})",
+                        size.width, size.height
+                    ),
+                );
+                // Nouvelle saisie (pas la suite de la précédente).
+                *p.type_ahead.borrow_mut() = fx_core::selection::TypeAhead::default();
+                p.on_key("r", false, false, false);
+                next(3000, dir);
+            }
+            20 => {
+                let kind = self.ui.get_preview_kind();
+                match fx_win::preview::handler_for("pdf") {
+                    Some(clsid) => self.check(
+                        kind == 3 && self.preview_native.get(),
+                        &format!("aperçu PDF par le prévisualiseur du Shell {clsid:?} (type {kind})"),
+                    ),
+                    None => self.check(
+                        kind != 1,
+                        &format!("pas de prévisualiseur PDF enregistré : repli (type {kind})"),
+                    ),
+                }
+                // Signal pour la capture d'écran du script de test.
+                let _ = std::fs::write(dir.join("capture-apercu.flag"), b"");
+                next(1500, dir);
+            }
+            21 => {
+                // Masquer le volet ferme le prévisualiseur natif.
+                self.toggle_preview();
+                self.check(!self.preview_native.get(), "volet masqué : prévisualiseur fermé");
                 slint::Timer::single_shot(Duration::from_millis(300), || with_app(|a| a.bench_report()));
             }
             _ => {}
@@ -1680,4 +1909,83 @@ fn poll_sizes(pane_id: u64, generation: u64, jobs: Vec<(Vec<u16>, Arc<fx_core::s
             }
         });
     });
+}
+
+/// Image BMP 24 bits (dégradé) pour l'auto-test de l'aperçu.
+fn test_bmp(w: u32, h: u32) -> Vec<u8> {
+    let row = (w * 3).div_ceil(4) * 4;
+    let data = row * h;
+    let mut b = Vec::with_capacity((54 + data) as usize);
+    b.extend_from_slice(b"BM");
+    b.extend_from_slice(&(54 + data).to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&54u32.to_le_bytes());
+    b.extend_from_slice(&40u32.to_le_bytes());
+    b.extend_from_slice(&(w as i32).to_le_bytes());
+    b.extend_from_slice(&(h as i32).to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&24u16.to_le_bytes());
+    b.extend_from_slice(&[0u8; 24]);
+    for y in 0..h {
+        for x in 0..w {
+            b.extend_from_slice(&[(255 * x / w) as u8, (255 * y / h) as u8, 200]);
+        }
+        b.resize(b.len() + (row - w * 3) as usize, 0);
+    }
+    b
+}
+
+/// Document PDF minimal (une page, un texte) pour l'auto-test de l'aperçu.
+fn test_pdf() -> Vec<u8> {
+    let content = "BT /F1 28 Tf 40 120 Td (WinDir - apercu PDF) Tj ET";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 297] /Contents 4 0 R          /Resources << /Font << /F1 5 0 R >> >> >>"
+            .to_string(),
+        format!("<< /Length {} >>
+stream
+{content}
+endstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut out = String::from(
+        "%PDF-1.4
+",
+    );
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out += &format!(
+            "{} 0 obj
+{o}
+endobj
+",
+            i + 1
+        );
+    }
+    let xref = out.len();
+    out += &format!(
+        "xref
+0 {}
+0000000000 65535 f 
+",
+        objects.len() + 1
+    );
+    for off in offsets {
+        out += &format!(
+            "{off:010} 00000 n 
+"
+        );
+    }
+    out += &format!(
+        "trailer
+<< /Size {} /Root 1 0 R >>
+startxref
+{xref}
+%%EOF
+",
+        objects.len() + 1
+    );
+    out.into_bytes()
 }
