@@ -176,6 +176,40 @@ impl Folder {
             .map(|i| i as u32)
     }
 
+    /// Nouveau dossier : `self` moins les entrées dont le nom est dans `removed`, plus `added`
+    /// (nom, entrée, libellé de type). Renvoie aussi, pour chaque ancien index, le nouveau.
+    pub fn with_changes(
+        &self,
+        removed: &std::collections::HashSet<Vec<u16>>,
+        added: &[(RawEntry<'_>, Arc<str>)],
+    ) -> (Folder, Vec<Option<u32>>) {
+        let mut out = Folder::with_capacity(self.path.clone(), self.len() + added.len());
+        out.types = self.types.clone();
+        let mut map = Vec::with_capacity(self.len());
+        for e in &self.entries {
+            let name = self.name_of(e);
+            if removed.contains(name) {
+                map.push(None);
+            } else {
+                map.push(Some(out.entries.len() as u32));
+                let raw = RawEntry {
+                    name,
+                    attributes: e.attributes,
+                    reparse_tag: e.reparse_tag,
+                    size: e.size,
+                    created: e.created,
+                    modified: e.modified,
+                };
+                out.push(&raw, e.type_id);
+            }
+        }
+        for (raw, label) in added {
+            let t = out.intern_type(label.clone());
+            out.push(raw, t);
+        }
+        (out, map)
+    }
+
     /// Octets occupés par les données (hors en-têtes de Vec), pour le suivi mémoire.
     pub fn heap_bytes(&self) -> usize {
         self.names.capacity() * 2 + self.entries.capacity() * size_of::<Entry>()
@@ -256,6 +290,27 @@ mod tests {
         assert_eq!(extension_key(&w("Makefile")), w(""));
         assert_eq!(extension_key(&w(".gitignore")), w("gitignore"));
         assert_eq!(extension_key(&w("x.ÉTÉ")), w("été"));
+    }
+
+    #[test]
+    fn with_changes_removes_replaces_and_maps() {
+        let mut f = Folder::new(PathBuf::from("d"));
+        let (a, b, c) = (w("a"), w("b"), w("c"));
+        f.push(&raw(&a, 0), 0);
+        f.push(&raw(&b, 0), 0);
+        f.push(&raw(&c, 0), 0);
+        let removed: std::collections::HashSet<Vec<u16>> = [a.clone(), c.clone()].into_iter().collect();
+        let mut c2 = raw(&c, 0);
+        c2.size = 99;
+        let (g, map) = f.with_changes(&removed, &[(c2, Arc::from("Texte"))]);
+        assert_eq!(map, vec![None, Some(0), None]);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g.name(1), &c[..]);
+        assert_eq!(g.entry(1).map(|e| e.size), Some(99));
+        assert_eq!(
+            g.entry(1).map(|e| g.type_label(e).to_string()).as_deref(),
+            Some("Texte")
+        );
     }
 
     #[test]

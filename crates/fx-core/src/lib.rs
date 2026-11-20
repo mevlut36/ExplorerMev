@@ -10,6 +10,7 @@ pub mod folder;
 pub mod format;
 pub mod history;
 pub mod loader;
+pub mod selection;
 pub mod sort;
 pub mod source;
 #[cfg(all(windows, feature = "windows"))]

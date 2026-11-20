@@ -47,6 +47,43 @@ impl SourceError {
     }
 }
 
+/// Entrée possédée (pour les événements de surveillance).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedRaw {
+    pub name: Vec<u16>,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub size: u64,
+    pub created: i64,
+    pub modified: i64,
+}
+
+impl OwnedRaw {
+    pub fn as_raw(&self) -> RawEntry<'_> {
+        RawEntry {
+            name: &self.name,
+            attributes: self.attributes,
+            reparse_tag: self.reparse_tag,
+            size: self.size,
+            created: self.created,
+            modified: self.modified,
+        }
+    }
+}
+
+/// Changement observé dans le dossier surveillé.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FsEvent {
+    /// Entrée créée ou modifiée (métadonnées à jour).
+    Upsert(OwnedRaw),
+    Remove(Vec<u16>),
+    /// Trop de changements ou dossier inaccessible : relister.
+    Reload,
+}
+
+/// Reçoit les lots d'événements, depuis le thread de surveillance.
+pub type WatchSink = Box<dyn FnMut(Vec<FsEvent>) + Send>;
+
 /// Source d'entrées de dossier (le système réel, ou un faux pour les tests).
 pub trait DirSource: Send + Sync + 'static {
     /// Prépare le thread de travail qui appellera la source (initialisation COM, par exemple).
@@ -65,6 +102,12 @@ pub trait DirSource: Send + Sync + 'static {
 
     /// Libellé de type pour ce nom de fichier (seule l'extension compte).
     fn type_name(&self, file_name: &[u16], is_dir: bool) -> Option<String>;
+
+    /// Surveille `path` ; la surveillance dure tant que la valeur renvoyée existe. `None` si la
+    /// source ne sait pas surveiller.
+    fn watch(&self, _path: &Path, _sink: WatchSink) -> Option<Box<dyn Send>> {
+        None
+    }
 }
 
 /// Source en mémoire pour les tests : dossiers déclarés à l'avance, délai optionnel par entrée.

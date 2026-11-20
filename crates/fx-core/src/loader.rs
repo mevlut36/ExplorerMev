@@ -57,6 +57,21 @@ pub enum LoadEvent {
 
 pub type Sink = Arc<dyn Fn(LoadEvent) + Send + Sync>;
 
+/// Résultat de l'application d'événements de surveillance.
+pub struct ApplyResult {
+    pub generation: u64,
+    /// `true` : les événements exigent de relister le dossier (débordement, dossier perdu).
+    pub reload: bool,
+    pub folder: Arc<Folder>,
+    pub keys: Arc<NameKeys>,
+    pub order: Vec<u32>,
+    pub visible: Vec<u32>,
+    /// Nouvel index de chaque ancienne entrée (`None` si elle a disparu ou a été remplacée).
+    pub map: Vec<Option<u32>>,
+    /// Index des entrées ajoutées ou mises à jour.
+    pub upserted: Vec<u32>,
+}
+
 /// Résultat d'un recalcul de vue (tri et/ou filtre).
 pub struct ViewResult {
     pub generation: u64,
@@ -157,6 +172,88 @@ impl Loader {
                 spec,
                 order: Some(order),
                 visible,
+            });
+        });
+    }
+
+    /// Surveille `path` ; les lots d'événements sont passés à `sink` (thread de surveillance).
+    pub fn watch(&self, path: &std::path::Path, sink: crate::source::WatchSink) -> Option<Box<dyn Send>> {
+        self.source.watch(path, sink)
+    }
+
+    /// Applique des événements de surveillance à `folder` sans relister le disque : nouveau
+    /// dossier, clés, tri et filtre recalculés sur le pool de calcul.
+    pub fn apply_events(
+        &self,
+        folder: Arc<Folder>,
+        events: Vec<crate::source::FsEvent>,
+        spec: SortSpec,
+        filter: Filter,
+        generation: u64,
+        done: impl FnOnce(ApplyResult) + Send + 'static,
+    ) {
+        use crate::source::FsEvent;
+        let source = self.source.clone();
+        let types = self.types.clone();
+        let collator = self.collator.clone();
+        rayon::spawn(move || {
+            if events.iter().any(|e| matches!(e, FsEvent::Reload)) {
+                done(ApplyResult {
+                    generation,
+                    reload: true,
+                    keys: Arc::new(NameKeys::build(
+                        &Folder::new(folder.path().to_path_buf()),
+                        &*collator,
+                    )),
+                    folder,
+                    order: Vec::new(),
+                    visible: Vec::new(),
+                    map: Vec::new(),
+                    upserted: Vec::new(),
+                });
+                return;
+            }
+            // Le dernier événement d'un nom l'emporte.
+            let mut last: Vec<(Vec<u16>, Option<crate::source::OwnedRaw>)> = Vec::new();
+            let mut index: HashMap<Vec<u16>, usize> = HashMap::new();
+            for ev in events {
+                let (name, value) = match ev {
+                    FsEvent::Upsert(r) => (r.name.clone(), Some(r)),
+                    FsEvent::Remove(n) => (n, None),
+                    FsEvent::Reload => continue,
+                };
+                match index.get(&name) {
+                    Some(&i) => last[i].1 = value,
+                    None => {
+                        index.insert(name.clone(), last.len());
+                        last.push((name, value));
+                    }
+                }
+            }
+            let removed: std::collections::HashSet<Vec<u16>> = last.iter().map(|(n, _)| n.clone()).collect();
+            let added: Vec<(RawEntry<'_>, Arc<str>)> = last
+                .iter()
+                .filter_map(|(_, v)| v.as_ref())
+                .map(|r| {
+                    let is_dir = r.attributes & crate::folder::ATTR_DIRECTORY != 0;
+                    (r.as_raw(), type_label(&*source, &types, &r.name, is_dir))
+                })
+                .collect();
+            let (new_folder, map) = folder.with_changes(&removed, &added);
+            let first_added = new_folder.len() - added.len();
+            let upserted = (first_added as u32..new_folder.len() as u32).collect();
+            let keys = NameKeys::build(&new_folder, &*collator);
+            let order = sorted_order_with_keys(&new_folder, spec, &keys, &*collator);
+            let visible = filter.apply(&new_folder, &order);
+            done(ApplyResult {
+                generation,
+                reload: false,
+                folder: Arc::new(new_folder),
+                keys: Arc::new(keys),
+                order,
+                visible,
+                map,
+                upserted,
             });
         });
     }
@@ -294,24 +391,29 @@ impl Job {
 
     /// Libellé de type, via le cache global puis la source.
     fn type_label(&self, name: &[u16], is_dir: bool) -> Arc<str> {
-        let key = (lower_owned(name, is_dir), is_dir);
-        if let Ok(cache) = self.types.lock()
-            && let Some(l) = cache.get(&key)
-        {
-            return l.clone();
-        }
-        let label: Arc<str> = Arc::from(self.source.type_name(name, is_dir).unwrap_or_else(|| {
-            if is_dir {
-                "Dossier de fichiers".into()
-            } else {
-                "Fichier".into()
-            }
-        }));
-        if let Ok(mut cache) = self.types.lock() {
-            cache.insert(key, label.clone());
-        }
-        label
+        type_label(&*self.source, &self.types, name, is_dir)
     }
+}
+
+/// Libellé de type, via le cache global puis la source.
+fn type_label(source: &dyn DirSource, cache: &TypeCache, name: &[u16], is_dir: bool) -> Arc<str> {
+    let key = (lower_owned(name, is_dir), is_dir);
+    if let Ok(c) = cache.lock()
+        && let Some(l) = c.get(&key)
+    {
+        return l.clone();
+    }
+    let label: Arc<str> = Arc::from(source.type_name(name, is_dir).unwrap_or_else(|| {
+        if is_dir {
+            "Dossier de fichiers".into()
+        } else {
+            "Fichier".into()
+        }
+    }));
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, label.clone());
+    }
+    label
 }
 
 /// Extension en minuscules (vide pour un dossier ou un nom sans point).
@@ -496,6 +598,64 @@ mod tests {
         let (sink, rx) = channel_sink();
         l2.load(PathBuf::from("ok"), 1, SortSpec::default(), sink);
         assert!(wait_complete(&rx).is_some());
+    }
+
+    #[test]
+    fn apply_events_updates_without_relisting() {
+        use crate::source::{FsEvent, OwnedRaw};
+        let l =
+            loader(MemorySource::default().with("D", &[("b", false, 1), ("a", false, 2), ("c", false, 3)]));
+        let (sink, rx) = channel_sink();
+        l.load(PathBuf::from("D"), 1, SortSpec::default(), sink);
+        let (_, folder, _) = wait_complete(&rx).expect("Complete");
+        let w = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let raw = |n: &str, size| OwnedRaw {
+            name: w(n),
+            attributes: 0,
+            reparse_tag: 0,
+            size,
+            created: 0,
+            modified: 0,
+        };
+        let events = vec![
+            FsEvent::Remove(w("a")),
+            FsEvent::Upsert(raw("d.txt", 10)),
+            FsEvent::Upsert(raw("b", 50)),
+            FsEvent::Upsert(raw("tmp", 1)),
+            FsEvent::Remove(w("tmp")),
+        ];
+        let (tx, rx2) = mpsc::channel();
+        l.apply_events(
+            folder.clone(),
+            events,
+            SortSpec::default(),
+            Filter::default(),
+            1,
+            move |r| {
+                let _ = tx.send(r);
+            },
+        );
+        let r = rx2.recv_timeout(Duration::from_secs(10)).expect("ApplyResult");
+        assert!(!r.reload);
+        let names: Vec<String> = r.visible.iter().map(|&i| r.folder.display_name(i)).collect();
+        assert_eq!(names, ["b", "c", "d.txt"]);
+        let b = r.folder.find(&w("b")).expect("b");
+        assert_eq!(r.folder.entry(b).map(|e| e.size), Some(50));
+        let old_c = folder.find(&w("c")).expect("c") as usize;
+        assert!(r.map[old_c].is_some());
+        assert_eq!(r.upserted.len(), 2);
+        let (tx, rx3) = mpsc::channel();
+        l.apply_events(
+            folder,
+            vec![FsEvent::Reload],
+            SortSpec::default(),
+            Filter::default(),
+            1,
+            move |r| {
+                let _ = tx.send(r.reload);
+            },
+        );
+        assert_eq!(rx3.recv_timeout(Duration::from_secs(10)).ok(), Some(true));
     }
 
     #[test]
