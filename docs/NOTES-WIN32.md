@@ -136,3 +136,53 @@ reproduire.
   de masquage.
 - Le code généré par `slint::include_modules!()` utilise `unwrap()`. On l'inclut dans un
   module annoté `#[allow(clippy::unwrap_used, …)]` pour garder les lints stricts sur notre code.
+
+---
+
+## Phase 2
+
+### Le Shell refuse les barres obliques
+
+- **Constat** : `SHParseDisplayName` et `SHCreateItemFromParsingName` échouent avec
+  `E_INVALIDARG` (« Paramètre incorrect ») sur `C:/Users/…`, alors que les API du système de
+  fichiers (`CreateFileW`…) acceptent ce chemin. Défaut trouvé par l'auto-test
+  (`windir --self-test`) : la création de dossier et le menu contextuel échouaient sur un
+  dossier passé avec des `/`.
+- **Parade** : tous les appels Shell passent par `fx_win::path::shell_path` (chemin absolu
+  normalisé, sans `\?\`), et le chemin de départ est normalisé dans `fx-app`.
+
+### Menu contextuel affiché par un autre thread que celui de la fenêtre
+
+- `TrackPopupMenuEx` fonctionne depuis l'hôte Shell (thread STA à part) avec sa fenêtre cachée
+  pour propriétaire, à condition d'attacher les files d'entrée (`AttachThreadInput`) avec le
+  thread de la fenêtre principale pendant l'affichage. Le menu se ferme alors normalement au
+  clic extérieur.
+- Les sous-menus dynamiques (« Envoyer vers », « Ouvrir avec ») ne se remplissent que si la
+  fenêtre propriétaire relaie `WM_INITMENUPOPUP`, `WM_DRAWITEM`, `WM_MEASUREITEM` et
+  `WM_MENUCHAR` à `IContextMenu3::HandleMenuMsg2` (vérifié par test : 7 entrées).
+- Fermeture automatique sans entrée synthétique (diagnostic) : minuterie sur la fenêtre hôte,
+  puis `EndMenu()`.
+
+### Constantes absentes du crate `windows` 0.62
+
+- `CMIC_MASK_UNICODE` (0x4000) et `MK_ALT` (0x20) ne sont pas exportées ; elles sont définies
+  localement avec leur valeur du SDK.
+
+### Glisser-déposer et boucle winit
+
+- winit enregistre par défaut sa propre cible OLE : on la désactive
+  (`with_drag_and_drop(false)` via le hook d'attributs de Slint) pour enregistrer notre
+  `IDropTarget`, après `OleInitialize` sur le thread d'interface.
+- `SHDoDragDrop` lance une boucle modale **à l'intérieur** d'un callback Slint. winit met alors
+  en attente les événements de la fenêtre : notre fenêtre n'est pas redessinée pendant un
+  glissement qu'elle a elle-même lancé (le dépôt fonctionne, mais la surbrillance du dossier
+  survolé n'apparaît qu'à la fin). OLE capture aussi la souris : on envoie à Slint un
+  relâchement synthétique (`dispatch_event`) après le dépôt.
+- `IDropTarget` est testé en l'appelant comme le fait OLE, avec un vrai objet de données du
+  Shell (`cargo test -p fx-win --test shell drop_target`).
+
+### `IShellItemImageFactory` renvoie de l'alpha prémultiplié
+
+- Les icônes de la liste d'images système (`IImageList::GetIcon`) sont en alpha droit ; les
+  bitmaps de `IShellItemImageFactory::GetImage` sont prémultipliés. `fx_win::icons` convertit
+  les deux vers de l'alpha droit pour Slint.

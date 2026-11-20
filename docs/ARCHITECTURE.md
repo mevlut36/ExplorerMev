@@ -62,10 +62,18 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 - Les appels Shell qui exigent un STA tournent sur des threads dédiés initialisés en
   `COINIT_APARTMENTTHREADED`, avec leur propre pompe de messages et une fenêtre propriétaire
   cachée pour les menus.
-**État en phase 1** : un thread `fx-list` par chargement (initialisé en STA pour
-`SHGetFileInfoW`), le tri et le filtre après chargement sur le pool `rayon`
-(`Loader::compute_view` / `filter_view`), un thread `fx-shell` (STA) pour `ShellExecuteExW`. La
-surveillance (`ReadDirectoryChangesW`) arrive en phase 2.
+**État en phase 2** — threads réellement utilisés :
+
+| Thread | Rôle |
+|---|---|
+| interface (STA OLE) | boucle Slint/winit, `IDropTarget`, source de glisser-déposer (`SHDoDragDrop`, exigé par OLE) |
+| `fx-list` (un par chargement, STA) | listing, types, tri initial |
+| pool `rayon` | tri, filtre, application des événements de surveillance (COM initialisé à la demande) |
+| `fx-watch` (un par dossier affiché) | `ReadDirectoryChangesW`, regroupement, lecture des entrées modifiées |
+| `fx-shell` (hôte Shell, STA OLE + fenêtre cachée) | menu contextuel, presse-papiers (propriétaire), ouverture de fichiers |
+| `fx-icon-0`, `fx-icon-1` (STA) | icônes des lignes affichées |
+| `fx-fileop` (un par opération, STA OLE) | `IFileOperation`, collage |
+| `fx-nav`, `fx-suggest` | volet de navigation (noms des lecteurs, délai de 1,5 s par lecteur), autocomplétion |
 
 - Chaque worker s'exécute sous `catch_unwind` (avec `panic = "unwind"` dans les crates de
   bibliothèque ; voir section 8). Un panic fait échouer la requête, est journalisé et ne
@@ -174,6 +182,6 @@ pub struct Folder {       // partagé en Arc<Folder> entre le chargeur et l'inte
 | Risque | Phase | Parade |
 |---|---|---|
 | Rendu logiciel trop coûteux en 4K à haute fréquence | 3 | Mesure en 4K ; limiter les images par seconde ; option `gpu` |
-| Interopérabilité drag-drop et menus Shell avec la boucle winit | 2 | Prototype isolé au début de la phase 2 |
+| Glisser-déposer lancé depuis notre fenêtre : pas de rafraîchissement pendant la boucle modale d'OLE | 2 | Limitation connue (NOTES-WIN32.md) |
 | Mise à jour du thème à chaud (palette Slint + DWM) | 1 | Test manuel en basculant le thème Windows |
 | Divulgation de noms par le service d'index | 5 | Filtrage par emprunt d'identité (ADR 0003) |
