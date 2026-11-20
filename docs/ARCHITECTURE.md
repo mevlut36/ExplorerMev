@@ -62,7 +62,7 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 - Les appels Shell qui exigent un STA tournent sur des threads dédiés initialisés en
   `COINIT_APARTMENTTHREADED`, avec leur propre pompe de messages et une fenêtre propriétaire
   cachée pour les menus.
-**État en phase 3** — threads réellement utilisés :
+**État en phase 4** — threads réellement utilisés :
 
 | Thread | Rôle |
 |---|---|
@@ -71,7 +71,10 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 | pool `rayon` | tri, filtre, application des événements de surveillance (COM initialisé à la demande) |
 | `fx-watch` (un par dossier affiché) | `ReadDirectoryChangesW`, regroupement, lecture des entrées modifiées |
 | `fx-shell` (hôte Shell, STA OLE + fenêtre cachée) | menu contextuel, presse-papiers (propriétaire), ouverture de fichiers |
-| `fx-icon-0`, `fx-icon-1` (STA) | icônes des lignes affichées |
+| `fx-icon-0`, `fx-icon-1` (STA) | icônes et vignettes des éléments affichés |
+| `fx-preview` (hôte d'aperçu, STA OLE) | prévisualiseurs du Shell (`IPreviewHandler`) dans une fenêtre enfant, vignettes du volet d'aperçu |
+| `fx-preview-text` (un par aperçu) | lecture des 64 premiers Kio d'un fichier texte |
+| pool `rayon` (taille de dossiers) | parcours récursif annulable, sans suivre les points de réanalyse |
 | `fx-fileop` (un par opération, STA OLE) | `IFileOperation`, collage |
 | `fx-latency` (modes de mesure seulement) | sonde de latence du thread d'interface |
 | `fx-nav`, `fx-suggest` | volet de navigation (noms des lecteurs, délai de 1,5 s par lecteur), autocomplétion |
@@ -152,6 +155,20 @@ pub struct Folder {       // partagé en Arc<Folder> entre le chargeur et l'inte
 - Vue détails maison : en-tête redimensionnable et `ListView` de lignes de hauteur fixe.
   Sélection multiple, édition de nom et icônes gérées par nos composants.
 - Le glisser-déposer intégré de winit est désactivé pour enregistrer notre `IDropTarget`.
+- **Onglets et volets** (phase 4) : un `Pane` porte tout l'état d'une vue (dossier, sélection,
+  historique, chargeur, surveillance, renommage) ; un `Tab` contient deux volets (le second
+  n'est affiché qu'en double volet) ; `App` garde l'état global (onglets, palette, aperçu,
+  favoris, session). La fenêtre a deux emplacements de volet ; seuls les volets de l'onglet
+  actif y sont rattachés.
+- **Vue icônes** : `ListView` de lignes de tuiles (`GridModel`, une ligne = `colonnes`
+  éléments du `FolderModel`). Chaque ligne fabriquée garde son modèle de tuiles ; un changement
+  d'élément (icône, sélection) met à jour la tuile en place. Les icônes ne sont demandées que
+  pour les lignes visibles (plage relevée à chaque image). Vignettes : cache du Shell puis
+  génération, jamais pour un fichier en ligne seulement, 200 au plus en mémoire.
+- **Aperçu** : texte (64 Kio, UTF-8/UTF-16), images (vignette du Shell), autres types par le
+  prévisualiseur enregistré (`IPreviewHandler`), dans une fenêtre enfant créée par le thread
+  `fx-preview` et replacée à chaque image si la mise en page change. Délai de 120 ms après le
+  dernier changement de sélection.
 
 ## 8. Erreurs, robustesse, configuration
 
