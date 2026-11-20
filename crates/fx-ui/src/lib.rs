@@ -55,6 +55,8 @@ pub struct Options {
     pub data_dir: Option<PathBuf>,
     /// Cache de l'index de recherche : `%LOCALAPPDATA%\WinDir\index`.
     pub index_dir: Option<PathBuf>,
+    /// Indexer par la MFT (assistant élevé) dès le démarrage de la recherche.
+    pub index_mft: bool,
     pub bench: Option<BenchMode>,
     /// Instant de début de `main`, pour l'instrumentation du démarrage.
     pub main_start: Instant,

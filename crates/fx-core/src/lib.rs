@@ -10,6 +10,7 @@ pub mod folder;
 pub mod format;
 pub mod history;
 pub mod loader;
+pub mod mft_proto;
 pub mod search;
 #[cfg(all(windows, feature = "windows"))]
 pub mod search_engine;

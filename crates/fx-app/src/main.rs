@@ -12,6 +12,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
 
 mod config;
+mod helper;
 
 const USAGE: &str = "\
 WinDir — explorateur de fichiers
@@ -224,6 +225,11 @@ fn install_panic_hook() {
 }
 
 fn main() -> ExitCode {
+    // Assistant d'indexation élevé : aucun autre traitement (ni configuration, ni interface).
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().map(String::as_str) == Some("--index-helper") {
+        return helper::run(&raw[1..]);
+    }
     let main_start = Instant::now();
     let args = match parse_args() {
         Ok(a) => a,
@@ -317,6 +323,7 @@ fn main() -> ExitCode {
         mica: args.mica.unwrap_or(cfg.mica),
         show_hidden: args.show_hidden.unwrap_or(cfg.show_hidden),
         icons_view: args.icons || cfg.icons_view,
+        index_mft: cfg.index_mft,
         network_timeout: args
             .network_timeout
             .map(std::time::Duration::from_secs)

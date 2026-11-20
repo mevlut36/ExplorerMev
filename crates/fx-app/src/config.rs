@@ -23,6 +23,9 @@ pub struct Config {
     pub log_level: String,
     /// Affichage des nouveaux volets : vue icônes plutôt que détails.
     pub icons_view: bool,
+    /// Index de recherche construit depuis la MFT (assistant élevé, invite UAC à chaque
+    /// session) plutôt que par parcours des dossiers.
+    pub index_mft: bool,
 }
 
 impl Default for Config {
@@ -35,6 +38,7 @@ impl Default for Config {
             network_timeout: Duration::from_secs(10),
             log_level: "info".into(),
             icons_view: false,
+            index_mft: false,
         }
     }
 }
@@ -63,9 +67,16 @@ log_level = "info"
 
 # Affichage des nouveaux volets : "details" (défaut) ou "icons" (Ctrl+Maj+V bascule).
 view = "details"
+
+# Recherche (Ctrl+Maj+F) : construire l'index depuis la table des fichiers NTFS (MFT), plus
+# rapide et toujours à jour. Demande les droits d'administration (confirmation de Windows à la
+# première recherche de chaque session). Sans cela, l'index est construit en parcourant les
+# dossiers.
+index_mft = false
 "#;
 
-const KNOWN: [&str; 7] = [
+const KNOWN: [&str; 8] = [
+    "index_mft",
     "view",
     "renderer",
     "mica",
@@ -148,6 +159,10 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
             "log_level" => match value.as_str() {
                 Some(l @ ("error" | "warn" | "info" | "debug" | "trace" | "off")) => cfg.log_level = l.into(),
                 _ => bad(key, "error, warn, info, debug, trace ou off"),
+            },
+            "index_mft" => match value.as_bool() {
+                Some(b) => cfg.index_mft = b,
+                None => bad(key, "true ou false"),
             },
             "view" => match value.as_str() {
                 Some("details") => cfg.icons_view = false,

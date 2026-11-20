@@ -22,7 +22,8 @@ use std::time::{Duration, Instant, SystemTime};
 use fx_win::listing::{file_ref, stat_entry};
 use fx_win::watcher::{DirChange, Watcher, watch_tree};
 
-use crate::search::{Query, ROOT_REC, VolumeIndex, record_of, search};
+use crate::mft_proto::{Frame, Rec, read_frame};
+use crate::search::{IndexMeta, Query, ROOT_REC, VolumeIndex, record_of, search};
 use crate::search_walk::{WalkProgress, build, record_of_path};
 
 /// Un cache plus ancien est rafraîchi par une reconstruction en arrière-plan (les
@@ -68,6 +69,10 @@ enum Cmd {
     Release,
     /// La recherche vient d'être ouverte : relire les index libérés avant la première frappe.
     Warm,
+    /// Trame de l'assistant d'indexation élevé (MFT, journal USN).
+    Mft(Frame),
+    /// L'assistant s'est arrêté (ou n'a pas pu démarrer).
+    MftEnded(String),
     Changes {
         vol: usize,
         changes: Vec<DirChange>,
@@ -83,6 +88,7 @@ enum Cmd {
 pub struct Engine {
     tx: Sender<Cmd>,
     latest: Arc<AtomicU64>,
+    letters: Vec<char>,
     _watchers: Vec<Watcher>,
 }
 
@@ -108,6 +114,7 @@ impl Engine {
         }
         let builder_tx = tx.clone();
         let l = latest.clone();
+        let letters = volumes.clone();
         let spawned = std::thread::Builder::new()
             .name("fx-search".into())
             .spawn(move || {
@@ -119,7 +126,26 @@ impl Engine {
         Self {
             tx,
             latest,
+            letters,
             _watchers: watchers,
+        }
+    }
+
+    /// Lance l'assistant d'indexation **élevé** (`exe --index-helper`, invite UAC) : la MFT
+    /// remplace le parcours des dossiers et le journal USN, la surveillance. À n'appeler
+    /// qu'à la demande de l'utilisateur.
+    pub fn start_mft(&self, exe: PathBuf) {
+        let tx = self.tx.clone();
+        let letters: String = self.letters.iter().collect();
+        let spawned = std::thread::Builder::new().name("fx-mft".into()).spawn(move || {
+            let reason = match mft_session(&exe, &letters, &tx) {
+                Ok(()) => "assistant d'indexation arrêté".to_string(),
+                Err(e) => e,
+            };
+            let _ = tx.send(Cmd::MftEnded(reason));
+        });
+        if let Err(e) = spawned {
+            tracing::error!("assistant d'indexation non démarré : {e}");
         }
     }
 
@@ -159,6 +185,62 @@ struct Vol {
     dirty: bool,
     /// Libéré de la mémoire (relu depuis le cache à la prochaine recherche).
     unloaded: bool,
+    /// Tenu à jour par le journal USN (assistant élevé) plutôt que par la surveillance.
+    mft: bool,
+    /// Index en cours de construction depuis la MFT.
+    mft_build: Option<VolumeIndex>,
+    /// Enregistrements du journal reçus pendant que l'index est libéré.
+    mft_pending: Vec<Rec>,
+}
+
+/// Crée le tube, lance l'assistant élevé, vérifie que c'est bien lui qui se connecte, puis
+/// relaie ses trames au moteur.
+fn mft_session(exe: &Path, letters: &str, tx: &Sender<Cmd>) -> Result<(), String> {
+    use fx_win::pipe::{PipeServer, launch_elevated, random_pipe_name};
+    let name = random_pipe_name();
+    let server = PipeServer::create(&name).map_err(|e| format!("tube : {e}"))?;
+    let args = format!("--index-helper {name} {} {letters}", std::process::id());
+    let child = launch_elevated(exe, &args).map_err(|e| format!("élévation refusée ou impossible : {e}"))?;
+    server
+        .accept(child.pid, child.handle(), Duration::from_secs(120))
+        .map_err(|e| format!("assistant : {e}"))?;
+    tracing::info!(pid = child.pid, "assistant d'indexation connecté");
+    loop {
+        match read_frame(&mut &server) {
+            Ok(Some(f)) => {
+                if tx.send(Cmd::Mft(f)).is_err() {
+                    return Ok(());
+                }
+            }
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("assistant : {e}")),
+        }
+    }
+}
+
+/// Applique un enregistrement de la MFT ou du journal USN.
+fn apply_mft(ix: &mut VolumeIndex, r: &Rec) {
+    const FILE_DELETE: u32 = 0x0000_0200;
+    const RENAME_OLD_NAME: u32 = 0x0000_1000;
+    const RENAME_NEW_NAME: u32 = 0x0000_2000;
+    let Some(rec) = record_of(r.frn) else { return };
+    // Enregistrements réservés de NTFS ($MFT, $LogFile…) et racine : jamais indexés.
+    if rec < 24 {
+        return;
+    }
+    let Some(parent) = record_of(r.parent) else { return };
+    if r.reason & FILE_DELETE != 0 {
+        ix.remove(rec);
+    } else if r.reason & RENAME_OLD_NAME != 0 && r.reason & RENAME_NEW_NAME == 0 {
+        // Ancien nom : le nouveau suit dans un autre enregistrement.
+    } else {
+        ix.upsert(
+            rec,
+            if parent == ROOT_REC { ROOT_REC } else { parent },
+            &r.name,
+            r.attributes,
+        );
+    }
 }
 
 fn cache_path(dir: &Path, letter: char) -> PathBuf {
@@ -198,7 +280,12 @@ fn save_cache(dir: &Path, ix: &mut VolumeIndex) {
 fn status(vols: &[Vol]) -> String {
     let parts: Vec<String> = vols
         .iter()
-        .map(|v| match (&v.index, v.building) {
+        .map(|v| match (&v.index, v.building || v.mft_build.is_some()) {
+            (Some(ix), false) if v.mft => format!(
+                "{}: {} éléments (MFT)",
+                v.letter,
+                crate::format::group_thousands(ix.len() as u64)
+            ),
             (Some(ix), true) => format!(
                 "{}: {} éléments (mise à jour…)",
                 v.letter,
@@ -249,6 +336,9 @@ fn run(
             stale: false,
             dirty: false,
             unloaded: false,
+            mft: false,
+            mft_build: None,
+            mft_pending: Vec::new(),
         });
     }
     on_event(EngineEvent::Status(status(&vols)));
@@ -358,6 +448,9 @@ fn reload(vols: &mut [Vol], cache_dir: &Path, tx: &Sender<Cmd>) {
         v.unloaded = false;
         match load_cache(cache_dir, v.letter, v.serial) {
             Some((mut ix, _)) if !v.stale => {
+                for r in std::mem::take(&mut v.mft_pending) {
+                    apply_mft(&mut ix, &r);
+                }
                 let pending = std::mem::take(&mut v.pending);
                 v.dirty = !pending.is_empty();
                 let overflow = apply(&mut ix, &v.root, v.serial, pending);
@@ -450,6 +543,10 @@ fn handle(cmd: Cmd, vols: &mut [Vol], cache_dir: &Path, tx: &Sender<Cmd>, on_eve
         Cmd::Warm => {}
         Cmd::Changes { vol, changes } => {
             let Some(v) = vols.get_mut(vol) else { return };
+            // Volume suivi par le journal USN : la surveillance est redondante.
+            if v.mft {
+                return;
+            }
             if v.building || v.index.is_none() {
                 if v.pending.len() + changes.len() > MAX_PENDING {
                     v.pending.clear();
@@ -474,6 +571,9 @@ fn handle(cmd: Cmd, vols: &mut [Vol], cache_dir: &Path, tx: &Sender<Cmd>, on_eve
         Cmd::Built { vol, result, secs } => {
             let Some(v) = vols.get_mut(vol) else { return };
             v.building = false;
+            if v.mft || v.mft_build.is_some() {
+                return; // l'index de la MFT est plus complet et déjà à jour
+            }
             match result {
                 Ok(mut ix) => {
                     tracing::info!(volume = %v.letter, elements = ix.len(), secs, "index construit");
@@ -487,6 +587,103 @@ fn handle(cmd: Cmd, vols: &mut [Vol], cache_dir: &Path, tx: &Sender<Cmd>, on_eve
                 Err(e) => tracing::warn!("index {}: {e}", v.letter),
             }
             on_event(EngineEvent::Status(status(vols)));
+        }
+        Cmd::Mft(frame) => handle_mft(frame, vols, cache_dir, on_event),
+        Cmd::MftEnded(reason) => {
+            tracing::info!("{reason}");
+            for v in vols.iter_mut() {
+                v.mft = false;
+                v.mft_build = None;
+            }
+            on_event(EngineEvent::Status(format!("{} · {reason}", status(vols))));
+        }
+    }
+}
+
+fn handle_mft(frame: Frame, vols: &mut [Vol], cache_dir: &Path, on_event: &dyn Fn(EngineEvent)) {
+    let letter = match &frame {
+        Frame::Begin { letter, .. }
+        | Frame::Records { letter, .. }
+        | Frame::EndEnum { letter }
+        | Frame::Changes { letter, .. }
+        | Frame::Error { letter, .. } => *letter,
+    };
+    let Some(v) = vols.iter_mut().find(|v| v.letter == letter) else {
+        return;
+    };
+    match frame {
+        Frame::Begin {
+            serial,
+            journal_id,
+            next_usn,
+            ..
+        } => {
+            if serial != 0 && serial != v.serial {
+                tracing::warn!(volume = %letter, "MFT d'un autre volume : ignorée");
+                return;
+            }
+            let mut ix = VolumeIndex::new(letter);
+            ix.meta = IndexMeta {
+                serial: v.serial,
+                source: 1,
+                journal_id,
+                next_usn,
+            };
+            v.mft_build = Some(ix);
+            on_event(EngineEvent::Status(status(vols)));
+        }
+        Frame::Records { records, .. } => {
+            if let Some(ix) = v.mft_build.as_mut() {
+                for r in &records {
+                    apply_mft(ix, r);
+                }
+            }
+        }
+        Frame::EndEnum { .. } => {
+            let Some(mut ix) = v.mft_build.take() else { return };
+            ix.shrink();
+            tracing::info!(volume = %letter, elements = ix.len(), "index construit depuis la MFT");
+            save_cache(cache_dir, &mut ix);
+            v.index = Some(ix);
+            v.unloaded = false;
+            v.mft = true;
+            v.dirty = false;
+            v.pending.clear();
+            v.stale = false;
+            on_event(EngineEvent::Status(status(vols)));
+        }
+        Frame::Changes {
+            next_usn, records, ..
+        } => {
+            if !v.mft {
+                return;
+            }
+            match v.index.as_mut() {
+                Some(ix) => {
+                    for r in &records {
+                        apply_mft(ix, r);
+                    }
+                    ix.meta.next_usn = next_usn;
+                    ix.maybe_compact();
+                    v.dirty = true;
+                }
+                None if v.mft_pending.len() + records.len() <= MAX_PENDING => v.mft_pending.extend(records),
+                None => {
+                    // Trop de changements pendant que l'index était libéré : la surveillance
+                    // reprend et l'index sera reconstruit à la relecture.
+                    v.mft_pending.clear();
+                    v.mft = false;
+                    v.stale = true;
+                }
+            }
+        }
+        Frame::Error { message, .. } => {
+            tracing::warn!(volume = %letter, "MFT illisible : {message}");
+            v.mft_build = None;
+            on_event(EngineEvent::Status(format!(
+                "{} · {letter}: MFT illisible ({message})",
+                status(vols)
+            )));
         }
     }
 }
@@ -611,6 +808,36 @@ mod tests {
             .as_os_str()
             .encode_wide()
             .collect()
+    }
+
+    #[test]
+    fn mft_and_journal_records_build_and_update_the_index() {
+        let rec = |frn: u64, parent: u64, reason: u32, name: &str, attrs: u32| Rec {
+            frn: frn | (3 << 48), // numéro de séquence ignoré
+            parent: parent | (1 << 48),
+            attributes: attrs,
+            reason,
+            name: name.encode_utf16().collect(),
+        };
+        let mut ix = VolumeIndex::new('C');
+        for r in [
+            rec(5, 5, 0, ".", 0x10),    // racine : ignorée
+            rec(9, 5, 0, "$Secure", 0), // réservé : ignoré
+            rec(100, 5, 0, "Projets", 0x10),
+            rec(101, 100, 0, "plan.txt", 0x20),
+        ] {
+            apply_mft(&mut ix, &r);
+        }
+        assert_eq!(ix.len(), 2);
+        assert_eq!(found(&ix, "plan"), [r"C:\Projets\plan.txt"]);
+        // Journal : renommage (ancien nom ignoré, nouveau appliqué), création, suppression.
+        apply_mft(&mut ix, &rec(100, 5, 0x1000, "Projets", 0x10));
+        apply_mft(&mut ix, &rec(100, 5, 0x2000, "Archives", 0x10));
+        assert_eq!(found(&ix, "plan"), [r"C:\Archives\plan.txt"]);
+        apply_mft(&mut ix, &rec(102, 100, 0x100, "neuf.md", 0x20));
+        assert_eq!(found(&ix, "neuf"), [r"C:\Archives\neuf.md"]);
+        apply_mft(&mut ix, &rec(101, 100, 0x200, "plan.txt", 0x20));
+        assert!(found(&ix, "plan").is_empty());
     }
 
     #[test]

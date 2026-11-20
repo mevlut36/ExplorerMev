@@ -18,6 +18,7 @@ pub mod listing;
 pub mod locale;
 pub mod path;
 mod pidl;
+pub mod pipe;
 pub mod preview;
 pub mod process;
 pub mod shell;

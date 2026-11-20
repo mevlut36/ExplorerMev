@@ -132,6 +132,7 @@ enum Cmd {
     WinEOn,
     WinEOff,
     Search,
+    IndexMft,
 }
 
 const COMMANDS: &[(Cmd, &str, &str)] = &[
@@ -166,6 +167,11 @@ const COMMANDS: &[(Cmd, &str, &str)] = &[
     (Cmd::AddFavorite, "Ajouter aux favoris", "Ctrl+D"),
     (Cmd::RemoveFavorite, "Retirer des favoris", ""),
     (Cmd::Search, "Rechercher sur l'ordinateur", "Ctrl+Maj+F"),
+    (
+        Cmd::IndexMft,
+        "Indexation rapide par la MFT (administrateur)…",
+        "",
+    ),
     (Cmd::WinEOn, "Remplacer Win+E par WinDir…", ""),
     (Cmd::WinEOff, "Rendre Win+E à l'Explorateur", ""),
 ];
@@ -193,6 +199,7 @@ pub(crate) struct App {
     session_seq: Cell<u64>,
     palette: RefCell<Vec<Cmd>>,
     index_dir: Option<PathBuf>,
+    index_mft: bool,
     /// Moteur de recherche, démarré à la première ouverture de la recherche.
     search: RefCell<Option<fx_core::search_engine::Engine>>,
     search_gen: Cell<u64>,
@@ -267,6 +274,7 @@ pub(crate) fn run(options: Options) -> Result<(), UiError> {
         session_seq: Cell::new(0),
         palette: RefCell::default(),
         index_dir: options.index_dir.clone(),
+        index_mft: options.index_mft,
         search: RefCell::new(None),
         search_gen: Cell::new(0),
         search_sent: Cell::new(None),
@@ -1004,21 +1012,70 @@ impl App {
 
     /// Premier affichage de la recherche : démarre le moteur (cache de l'index, puis mise à
     /// jour en arrière-plan). L'index n'occupe la mémoire qu'à partir de là.
+    /// Démarre le moteur de recherche s'il ne tourne pas ; `false` s'il ne peut pas démarrer.
+    fn ensure_search_engine(&self) -> bool {
+        if self.search.borrow().is_some() {
+            return true;
+        }
+        let Some(dir) = self.index_dir.clone() else {
+            self.ui
+                .set_search_status("Dossier du cache d'index introuvable.".into());
+            return false;
+        };
+        let volumes = fx_win::shell::fixed_ntfs_volumes();
+        self.ui.set_search_status("Chargement de l'index…".into());
+        let engine = fx_core::search_engine::Engine::start(dir, volumes, |ev| {
+            post(move |a| a.on_search_event(ev));
+        });
+        // Réglage `index_mft = true` : l'utilisateur a choisi l'indexation par la MFT.
+        if self.index_mft
+            && let Ok(exe) = std::env::current_exe()
+        {
+            engine.start_mft(exe);
+        }
+        *self.search.borrow_mut() = Some(engine);
+        true
+    }
+
+    /// Indexation rapide par la MFT : confirmation, puis assistant élevé (invite UAC).
+    fn index_with_mft(self: &Rc<Self>) {
+        let owner = self.hwnd.get().unwrap_or(0);
+        let posted = self.host_post_raw(move |_| {
+            let ok = fx_win::shell::confirm(
+                owner,
+                "Indexation rapide (MFT)",
+                "WinDir peut lire directement la table des fichiers des volumes NTFS (MFT) et \
+                 leur journal de modifications : l'index est construit en quelques secondes et \
+                 reste à jour sans surveiller les dossiers.\n\nCela demande les droits \
+                 d'administration : Windows va afficher une demande de confirmation. Un petit \
+                 assistant tourne alors avec ces droits jusqu'à la fermeture de WinDir ; il ne \
+                 fait que lire et transmettre les noms des fichiers.\n\nLa recherche montrera \
+                 aussi les noms des fichiers de dossiers que votre compte ne peut pas ouvrir \
+                 (sans leur contenu).\n\nContinuer ?",
+            );
+            if ok {
+                post(|a| {
+                    if a.ensure_search_engine()
+                        && let (Some(e), Ok(exe)) = (a.search.borrow().as_ref(), std::env::current_exe())
+                    {
+                        e.start_mft(exe);
+                    }
+                });
+            }
+        });
+        if !posted {
+            self.active_pane()
+                .flash_status("Le service Shell est indisponible.".into());
+        }
+    }
+
     fn search_opened(self: &Rc<Self>) {
-        if self.search.borrow().is_none() {
-            let Some(dir) = self.index_dir.clone() else {
-                self.ui
-                    .set_search_status("Dossier du cache d'index introuvable.".into());
-                return;
-            };
-            let volumes = fx_win::shell::fixed_ntfs_volumes();
-            self.ui.set_search_status("Chargement de l'index…".into());
-            let engine = fx_core::search_engine::Engine::start(dir, volumes, |ev| {
-                post(move |a| a.on_search_event(ev));
-            });
-            *self.search.borrow_mut() = Some(engine);
-        } else if let Some(e) = self.search.borrow().as_ref() {
-            e.warm();
+        if self.search.borrow().is_some() {
+            if let Some(e) = self.search.borrow().as_ref() {
+                e.warm();
+            }
+        } else if !self.ensure_search_engine() {
+            return;
         }
         let q = self.ui.get_search_query();
         if !q.trim().is_empty() {
@@ -1187,6 +1244,7 @@ impl App {
             Cmd::AddFavorite => self.add_favorite(),
             Cmd::RemoveFavorite => self.remove_favorite(),
             Cmd::Search => self.ui.invoke_open_search(),
+            Cmd::IndexMft => self.index_with_mft(),
             Cmd::WinEOn => self.set_win_e(true),
             Cmd::WinEOff => self.set_win_e(false),
         }

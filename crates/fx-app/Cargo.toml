@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+fx-core.workspace = true
 fx-ui.workspace = true
 fx-win.workspace = true
 toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
