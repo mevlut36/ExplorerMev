@@ -1,0 +1,33 @@
+[package]
+name = "slint-scroll"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+description = "Prototype jetable de la phase 0 : Slint + Mica + 100 000 lignes, mesure du défilement."
+
+[dependencies]
+raw-window-handle = "0.6"
+slint = { version = "1.19.0", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "raw-window-handle-06",
+    "unstable-winit-030",
+] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+] }
+
+[build-dependencies]
+slint-build = "1.19.0"
+
+[features]
+# Active le moteur de rendu Skia pour comparaison (télécharge des binaires Skia précompilés).
+skia = ["slint/renderer-skia"]

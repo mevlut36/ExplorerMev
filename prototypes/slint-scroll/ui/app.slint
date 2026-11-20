@@ -1,0 +1,319 @@
+// Prototype jetable (phase 0) : vue détails virtualisée de type Explorateur Windows 11.
+// Deux fenêtres exportées pour comparer une vue maison (ListView + lignes dessinées à la main)
+// et le StandardTableView du style fluent.
+
+import { ListView, StandardTableView, Palette } from "std-widgets.slint";
+
+export struct Row {
+    name: string,
+    modified: string,
+    kind: string,
+    size: string,
+    is-dir: bool,
+}
+
+global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    // Couleurs de « couche » Windows 11 (LayerFillColorDefault) posées sur le Mica.
+    out property <brush> layer: dark ? #3a3a3a4c : #ffffff80;
+    out property <brush> hover: dark ? #ffffff0f : #0000000a;
+    out property <brush> selected: dark ? #ffffff15 : #0000000f;
+    out property <brush> divider: dark ? #ffffff15 : #0000000f;
+    out property <brush> text-secondary: dark ? #ffffffc5 : #000000a0;
+    out property <length> row-height: 32px;
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in-out property <length> col-width;
+    callback clicked;
+    width: col-width;
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Rectangle {
+        background: ta.has-hover ? Theme.hover : transparent;
+    }
+    Text {
+        x: 12px;
+        width: parent.width - 20px;
+        text: root.text;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    // Poignée de redimensionnement de colonne.
+    Rectangle {
+        x: parent.width - 4px;
+        width: 8px;
+        Rectangle {
+            x: 3px;
+            width: 1px;
+            height: 50%;
+            background: Theme.divider;
+        }
+        TouchArea {
+            mouse-cursor: col-resize;
+            moved => {
+                if self.pressed {
+                    root.col-width = max(48px, root.col-width + self.mouse-x - self.pressed-x);
+                }
+            }
+        }
+    }
+}
+
+component FileRow inherits Rectangle {
+    in property <Row> data;
+    in property <bool> selected;
+    in property <length> w-name;
+    in property <length> w-date;
+    in property <length> w-type;
+    in property <length> w-size;
+    callback clicked;
+    height: Theme.row-height;
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    Rectangle {
+        x: 4px;
+        width: parent.width - 8px;
+        y: 1px;
+        height: parent.height - 2px;
+        border-radius: 4px;
+        background: root.selected ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
+    }
+    // Barre d'accent de sélection, comme dans l'Explorateur de Windows 11.
+    if root.selected: Rectangle {
+        x: 4px;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: Palette.accent-background;
+    }
+
+    Text {
+        x: 14px;
+        width: 20px;
+        text: root.data.is-dir ? "\u{E8B7}" : "\u{E8A5}";
+        font-family: "Segoe Fluent Icons";
+        font-size: 16px;
+        color: root.data.is-dir ? #e8b84a : Theme.text-secondary;
+        vertical-alignment: center;
+    }
+    Text {
+        x: 42px;
+        width: root.w-name - 46px;
+        text: root.data.name;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: root.w-name + 12px;
+        width: root.w-date - 16px;
+        text: root.data.modified;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: root.w-name + root.w-date + 12px;
+        width: root.w-type - 16px;
+        text: root.data.kind;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: root.w-name + root.w-date + root.w-type;
+        width: root.w-size - 12px;
+        text: root.data.size;
+        font-size: 12px;
+        color: Theme.text-secondary;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+        overflow: elide;
+    }
+}
+
+component TopBar inherits Rectangle {
+    in property <string> title;
+    in property <string> stats;
+    height: 44px;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        Text {
+            text: "\u{E8B7}";
+            font-family: "Segoe Fluent Icons";
+            font-size: 16px;
+            color: #e8b84a;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.title;
+            font-size: 14px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.stats;
+            font-size: 12px;
+            color: Theme.text-secondary;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component NavPane inherits VerticalLayout {
+    width: 200px;
+    padding: 8px;
+    spacing: 2px;
+    for item in [
+        { glyph: "\u{E80F}", label: "Accueil" },
+        { glyph: "\u{E8FC}", label: "Bureau" },
+        { glyph: "\u{E896}", label: "Téléchargements" },
+        { glyph: "\u{E8A5}", label: "Documents" },
+        { glyph: "\u{EDA2}", label: "Disque local (C:)" },
+    ]: Rectangle {
+        height: 32px;
+        border-radius: 4px;
+        background: nta.has-hover ? Theme.hover : transparent;
+        nta := TouchArea { }
+        Text {
+            x: 12px;
+            text: item.glyph;
+            font-family: "Segoe Fluent Icons";
+            font-size: 16px;
+            vertical-alignment: center;
+        }
+        Text {
+            x: 40px;
+            text: item.label;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle { }
+}
+
+// Vue maison : en-tête + ListView, lignes de hauteur fixe.
+export component CustomViewWindow inherits Window {
+    title: "Prototype phase 0 — vue maison";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    default-font-family: "Segoe UI Variable Text";
+    in property <bool> mica: true;
+    background: mica ? transparent : Palette.background;
+
+    in property <[Row]> rows;
+    in property <string> folder-title;
+    in property <string> stats;
+    in-out property <int> selected: -1;
+    in-out property <length> scroll-y <=> list.content-y;
+    out property <length> max-scroll: max(0px, list.content-height - list.visible-height);
+
+    in-out property <length> w-name: 360px;
+    in-out property <length> w-date: 170px;
+    in-out property <length> w-type: 150px;
+    in-out property <length> w-size: 110px;
+
+    VerticalLayout {
+        TopBar {
+            title: root.folder-title;
+            stats: root.stats;
+        }
+        HorizontalLayout {
+            NavPane { }
+            Rectangle {
+                background: Theme.layer;
+                border-top-left-radius: 8px;
+                VerticalLayout {
+                    padding-top: 4px;
+                    Rectangle {
+                        height: 32px;
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            alignment: start;
+                            HeaderCell {
+                                text: "Nom";
+                                col-width <=> root.w-name;
+                            }
+                            HeaderCell {
+                                text: "Modifié le";
+                                col-width <=> root.w-date;
+                            }
+                            HeaderCell {
+                                text: "Type";
+                                col-width <=> root.w-type;
+                            }
+                            HeaderCell {
+                                text: "Taille";
+                                col-width <=> root.w-size;
+                            }
+                        }
+                    }
+                    list := ListView {
+                        for row[i] in root.rows: FileRow {
+                            data: row;
+                            selected: i == root.selected;
+                            w-name: root.w-name;
+                            w-date: root.w-date;
+                            w-type: root.w-type;
+                            w-size: root.w-size;
+                            clicked => { root.selected = i; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Composant standard du style fluent, pour comparaison.
+export component TableViewWindow inherits Window {
+    title: "Prototype phase 0 — StandardTableView";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    default-font-family: "Segoe UI Variable Text";
+    in property <bool> mica: true;
+    background: mica ? transparent : Palette.background;
+
+    in property <[[StandardListViewItem]]> rows;
+    in property <string> folder-title;
+    in property <string> stats;
+    in-out property <length> scroll-y <=> table.content-y;
+    out property <length> max-scroll: max(0px, table.content-height - table.visible-height);
+
+    VerticalLayout {
+        TopBar {
+            title: root.folder-title;
+            stats: root.stats;
+        }
+        HorizontalLayout {
+            NavPane { }
+            Rectangle {
+                background: Theme.layer;
+                border-top-left-radius: 8px;
+                table := StandardTableView {
+                    width: 100%;
+                    height: 100%;
+                    columns: [
+                        { title: "Nom", width: 360px },
+                        { title: "Modifié le", width: 170px },
+                        { title: "Type", width: 150px },
+                        { title: "Taille", width: 110px },
+                    ];
+                    rows: root.rows;
+                }
+            }
+        }
+    }
+}
