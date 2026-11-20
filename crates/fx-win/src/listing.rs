@@ -64,6 +64,9 @@ pub struct RawEntry<'a> {
     /// FILETIME (intervalles de 100 ns depuis 1601, UTC).
     pub created: i64,
     pub modified: i64,
+    /// Référence de fichier (NTFS : numéro d'enregistrement MFT sur les 48 bits de poids
+    /// faible) ; 0 si la méthode de listing ne la fournit pas.
+    pub file_id: u64,
 }
 
 /// Options d'énumération.
@@ -229,6 +232,7 @@ struct RawEntryOwnedFields {
     size: u64,
     created: i64,
     modified: i64,
+    file_id: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -258,6 +262,7 @@ impl DirInfo for IdExtd {
             size: i.EndOfFile.max(0) as u64,
             created: i.CreationTime,
             modified: i.LastWriteTime,
+            file_id: u64::from_le_bytes(i.FileId.Identifier[..8].try_into().unwrap_or([0; 8])),
         }
     }
 }
@@ -285,6 +290,7 @@ impl DirInfo for Full {
             size: i.EndOfFile.max(0) as u64,
             created: i.CreationTime,
             modified: i.LastWriteTime,
+            file_id: 0,
         }
     }
 }
@@ -396,6 +402,7 @@ fn by_handle<T: DirInfo>(
                     size: f.size,
                     created: f.created,
                     modified: f.modified,
+                    file_id: f.file_id,
                 });
             }
             let next = info.next() as usize;
@@ -437,6 +444,7 @@ fn emit_find(data: &WIN32_FIND_DATAW, on_entry: &mut dyn FnMut(&RawEntry<'_>)) {
         size: ((data.nFileSizeHigh as u64) << 32) | data.nFileSizeLow as u64,
         created: filetime(data.ftCreationTime),
         modified: filetime(data.ftLastWriteTime),
+        file_id: 0,
     });
 }
 
@@ -533,4 +541,35 @@ pub fn stat_entry(dir: &Path, name: &[u16]) -> Option<OwnedEntry> {
         })
     });
     out
+}
+
+/// Référence de fichier (NTFS : enregistrement MFT) et numéro de série du volume de `path`.
+/// Ouvre l'élément sans droit de lecture du contenu (aucun téléchargement OneDrive), sans
+/// suivre un point d'analyse.
+pub fn file_ref(path: &Path) -> Option<(u64, u32)> {
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        GetFileInformationByHandle,
+    };
+    let wide = verbatim_wide(path).ok()?;
+    // SAFETY: `wide` est terminé par un nul et vit pendant l'appel ; le handle est possédé par
+    // `OwnedHandle`.
+    let h = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .ok()?;
+    let handle = OwnedHandle(h);
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: structure locale passée par référence ; handle valide.
+    unsafe { GetFileInformationByHandle(handle.0, &mut info) }.ok()?;
+    let r = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    Some((r, info.dwVolumeSerialNumber))
 }

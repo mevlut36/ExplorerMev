@@ -62,6 +62,29 @@ pub const MAX_DELAY: Duration = Duration::from_millis(250);
 /// Commence à surveiller `path`. `on_batch` est appelé depuis le thread de surveillance.
 pub fn watch(
     path: &Path,
+    on_batch: impl FnMut(Vec<DirChange>) + Send + 'static,
+) -> Result<Watcher, ListError> {
+    start(path, Mode::Dir, on_batch)
+}
+
+/// Surveille toute l'arborescence de `path` (un volume entier pour l'index de recherche) :
+/// noms et attributs seulement, chemins relatifs à `path`.
+pub fn watch_tree(
+    path: &Path,
+    on_batch: impl FnMut(Vec<DirChange>) + Send + 'static,
+) -> Result<Watcher, ListError> {
+    start(path, Mode::Tree, on_batch)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Dir,
+    Tree,
+}
+
+fn start(
+    path: &Path,
+    mode: Mode,
     mut on_batch: impl FnMut(Vec<DirChange>) + Send + 'static,
 ) -> Result<Watcher, ListError> {
     let wide = verbatim_wide(path).map_err(ListError::InvalidPath)?;
@@ -83,10 +106,17 @@ pub fn watch(
     let stop = OwnedHandle(unsafe { CreateEventW(None, true, false, PCWSTR::null()) }?);
     let stop_raw = stop.0.0 as isize;
     let thread = std::thread::Builder::new()
-        .name("fx-watch".into())
+        .name(
+            if mode == Mode::Tree {
+                "fx-watch-tree"
+            } else {
+                "fx-watch"
+            }
+            .into(),
+        )
         .spawn(move || {
             let stop = HANDLE(stop_raw as *mut _);
-            run(&dir, &io_event, stop, &mut on_batch);
+            run(&dir, &io_event, stop, mode, &mut on_batch);
         })
         .map_err(|e| {
             ListError::Other(windows::core::Error::new(
@@ -109,8 +139,23 @@ const FILTER: FILE_NOTIFY_CHANGE = FILE_NOTIFY_CHANGE(
         | FILE_NOTIFY_CHANGE_CREATION.0,
 );
 
-fn run(dir: &OwnedHandle, io_event: &OwnedHandle, stop: HANDLE, on_batch: &mut dyn FnMut(Vec<DirChange>)) {
-    let mut buf: Vec<u64> = vec![0; 64 * 1024 / 8];
+/// Arborescence : noms et attributs (caché, système) seulement.
+const TREE_FILTER: FILE_NOTIFY_CHANGE = FILE_NOTIFY_CHANGE(
+    FILE_NOTIFY_CHANGE_FILE_NAME.0 | FILE_NOTIFY_CHANGE_DIR_NAME.0 | FILE_NOTIFY_CHANGE_ATTRIBUTES.0,
+);
+
+fn run(
+    dir: &OwnedHandle,
+    io_event: &OwnedHandle,
+    stop: HANDLE,
+    mode: Mode,
+    on_batch: &mut dyn FnMut(Vec<DirChange>),
+) {
+    let (subtree, filter, size) = match mode {
+        Mode::Dir => (false, FILTER, 64 * 1024),
+        Mode::Tree => (true, TREE_FILTER, 512 * 1024),
+    };
+    let mut buf: Vec<u64> = vec![0; size / 8];
     let bytes = (buf.len() * 8) as u32;
     let mut pending: Vec<DirChange> = Vec::new();
     let mut first_at: Option<Instant> = None;
@@ -129,8 +174,8 @@ fn run(dir: &OwnedHandle, io_event: &OwnedHandle, stop: HANDLE, on_batch: &mut d
                 dir.0,
                 buf.as_mut_ptr().cast(),
                 bytes,
-                false,
-                FILTER,
+                subtree,
+                filter,
                 None,
                 Some(&mut ov),
                 None,

@@ -244,3 +244,33 @@ pub fn show_properties(paths: &[PathBuf], owner: isize) -> windows::core::Result
         }
     }
 }
+
+/// Lettres des volumes fixes formatés en NTFS (ceux que l'index de recherche couvre).
+pub fn fixed_ntfs_volumes() -> Vec<char> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    // SAFETY: aucun argument.
+    let mask = unsafe { GetLogicalDrives() };
+    let mut out = Vec::new();
+    for i in 0..26u8 {
+        if mask & (1 << i) == 0 {
+            continue;
+        }
+        let letter = (b'A' + i) as char;
+        let root: Vec<u16> = format!("{letter}:\\")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: chaîne terminée par un nul.
+        if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != 3 {
+            continue; // DRIVE_FIXED
+        }
+        let mut fs = [0u16; 32];
+        // SAFETY: chaîne terminée par un nul ; tampon local de taille transmise.
+        let ok =
+            unsafe { GetVolumeInformationW(PCWSTR(root.as_ptr()), None, None, None, None, Some(&mut fs)) };
+        if ok.is_ok() && String::from_utf16_lossy(&fs).trim_end_matches(' ') == "NTFS" {
+            out.push(letter);
+        }
+    }
+    out
+}

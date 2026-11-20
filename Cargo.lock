@@ -1409,6 +1409,7 @@ name = "fx-core"
 version = "0.1.0"
 dependencies = [
  "fx-win",
+ "memchr",
  "rayon",
  "tempfile",
  "thiserror 2.0.21",

@@ -10,6 +10,11 @@ pub mod folder;
 pub mod format;
 pub mod history;
 pub mod loader;
+pub mod search;
+#[cfg(all(windows, feature = "windows"))]
+pub mod search_engine;
+#[cfg(all(windows, feature = "windows"))]
+pub mod search_walk;
 pub mod selection;
 pub mod size;
 pub mod sort;

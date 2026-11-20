@@ -12,6 +12,7 @@ windows = ["dep:fx-win"]
 
 [dependencies]
 fx-win = { workspace = true, optional = true }
+memchr.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

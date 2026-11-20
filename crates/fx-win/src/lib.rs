@@ -22,6 +22,7 @@ pub mod preview;
 pub mod process;
 pub mod shell;
 pub mod shell_host;
+pub mod usn;
 pub mod watcher;
 pub mod win_e;
 
