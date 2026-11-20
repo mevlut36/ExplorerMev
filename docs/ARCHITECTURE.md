@@ -62,7 +62,7 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 - Les appels Shell qui exigent un STA tournent sur des threads dédiés initialisés en
   `COINIT_APARTMENTTHREADED`, avec leur propre pompe de messages et une fenêtre propriétaire
   cachée pour les menus.
-**État en phase 4** — threads réellement utilisés :
+**État en phase 5** — threads réellement utilisés :
 
 | Thread | Rôle |
 |---|---|
@@ -72,6 +72,11 @@ fx-app ──► fx-ui ──► fx-core ◄── fx-index (client)
 | `fx-watch` (un par dossier affiché) | `ReadDirectoryChangesW`, regroupement, lecture des entrées modifiées |
 | `fx-shell` (hôte Shell, STA OLE + fenêtre cachée) | menu contextuel, presse-papiers (propriétaire), ouverture de fichiers |
 | `fx-icon-0`, `fx-icon-1` (STA) | icônes et vignettes des éléments affichés |
+| `fx-search` (dès la première recherche) | possède les index de recherche : requêtes (seule la plus récente est exécutée, balayage parallèle `rayon`), changements, cache, libération après 5 min d'inactivité |
+| `fx-search-build` + pool `fx-index-N` (priorité arrière-plan, moitié des cœurs) | construction d'un index par parcours des dossiers |
+| `fx-watch-tree` (un par volume indexé) | surveillance récursive de la racine du volume (noms et attributs) |
+| `fx-mft` (sur demande) | tube vers l'assistant élevé ; relaie ses trames au moteur |
+| processus `windir --index-helper` (élevé, sur demande) | lit la MFT puis le journal USN, filtre par droits d'accès, écrit dans le tube ; ne lit rien |
 | `fx-preview` (hôte d'aperçu, STA OLE) | prévisualiseurs du Shell (`IPreviewHandler`) dans une fenêtre enfant, vignettes du volet d'aperçu |
 | `fx-preview-text` (un par aperçu) | lecture des 64 premiers Kio d'un fichier texte |
 | pool `rayon` (taille de dossiers) | parcours récursif annulable, sans suivre les points de réanalyse |

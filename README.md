@@ -3,13 +3,14 @@
 Explorateur de fichiers pour Windows 11, écrit en Rust, conçu pour être nettement plus rapide et
 plus léger que l'Explorateur Windows.
 
-> **État : phase 4 terminée (fonctions avancées).** Navigation, icônes, sélection multiple,
+> **État : phase 5 terminée (recherche instantanée).** Navigation, icônes, sélection multiple,
 > renommage, corbeille, presse-papiers, menu contextuel natif, glisser-déposer,
 > rafraîchissement automatique, partages réseau annulables, état OneDrive ; onglets avec
 > restauration de session, double volet, vue icônes avec vignettes, volet d'aperçu (texte,
 > images, PDF/Office par les prévisualiseurs de Windows), palette de commandes, taille des
-> dossiers, favoris, terminal, copie du chemin, propriétés, option « Remplacer Win+E ».
-> Recherche instantanée : phase 5.
+> dossiers, favoris, terminal, copie du chemin, propriétés, option « Remplacer Win+E » ;
+> recherche par nom sur tous les volumes NTFS (Ctrl+Maj+F), sans droits ou, sur demande, par
+> la MFT. Distribution : phase 6.
 
 ## Compilation et lancement
 
@@ -54,6 +55,7 @@ target\release\windir.exe --help
 | Ctrl+Maj+V | Vue détails ou vue icônes (flèches : déplacement en grille) |
 | Alt+P | Volet d'aperçu |
 | Ctrl+Maj+P | Palette de commandes (toutes les commandes, avec recherche) |
+| Ctrl+Maj+F | Rechercher sur l'ordinateur ; Entrée affiche l'élément dans son dossier, Ctrl+Entrée l'ouvre |
 | Ctrl+Maj+S | Calculer la taille des dossiers sélectionnés (en arrière-plan) |
 | Ctrl+D | Ajouter aux favoris (volet de navigation) |
 | Ctrl+Maj+C | Copier le chemin d'accès |
@@ -64,7 +66,8 @@ target\release\windir.exe --help
 
 `%APPDATA%\WinDir\config.toml`, créé avec ses commentaires au premier lancement : moteur de
 rendu, Mica, dossier de départ, éléments masqués, délai réseau (10 s par défaut), niveau du
-journal, affichage des nouveaux volets (`view = "details"` ou `"icons"`). Une valeur invalide est ignorée avec un avertissement ; un fichier illisible n'est
+journal, affichage des nouveaux volets (`view = "details"` ou `"icons"`), indexation par la
+MFT (`index_mft`, désactivée par défaut). Une valeur invalide est ignorée avec un avertissement ; un fichier illisible n'est
 jamais écrasé. Les options de la ligne de commande sont prioritaires (`windir --help`).
 
 Les onglets (et leur double volet) sont restaurés au lancement sans dossier en argument
@@ -75,6 +78,15 @@ palette (confirmée), ou `windir --win-e on`. « Rendre Win+E à l'Explorateur �
 `windir --win-e off` rétablit le comportement d'origine ; `windir --win-e status` affiche l'état.
 Seule une clé de l'utilisateur courant est écrite ; WinDir refuse si un autre programme a déjà
 pris Win+E.
+
+**Recherche** (Ctrl+Maj+F) : index des noms de tous les volumes NTFS fixes, construit à la
+première recherche en parcourant les dossiers (sans droits, en priorité arrière-plan), puis tenu
+à jour par une surveillance des volumes. Il est gardé en cache dans
+`%LOCALAPPDATA%\WinDir\index` (relu en 0,2 s) et libéré de la mémoire après 5 minutes sans
+recherche. La commande « Indexation rapide par la MFT (administrateur)… » lance, après
+confirmation et invite de Windows, un petit assistant élevé qui lit la table des fichiers et son
+journal de modifications ; il ne transmet que les noms des dossiers que votre compte peut
+ouvrir, et s'arrête avec WinDir (détails : [ADR 0003](docs/adr/0003-strategie-index.md)).
 
 La colonne « État » montre l'état OneDrive : nuage (en ligne seulement), coche (disponible
 localement), coche pleine (toujours conservé).
@@ -88,9 +100,11 @@ localement), coche pleine (toujours conservé).
 | 100 000 fichiers, premier affichage < 150 ms | 9–16 ms |
 | 100 000 fichiers, liste triée < 1 s | 61–72 ms |
 | Défilement à 60 i/s, 100 000 éléments | vue détails : 0 image > 16,7 ms (fenêtre et plein écran) ; vue icônes : idem, sauf sauts aléatoires en plein écran (81 i/s) |
+| Recherche < 50 ms par frappe | frappe → résultats : médiane 8–9 ms, max 17 ms (2,4 millions d'éléments) |
 | Thread d'interface jamais bloqué | latence max 12 ms, 0 mesure > 50 ms |
 
-Détails et limites : [docs/mesures/phase3.md](docs/mesures/phase3.md).
+Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/phase4.md),
+[phase 5](docs/mesures/phase5.md).
 
 ## Organisation
 

@@ -265,3 +265,43 @@ reproduire.
 - Les icônes sont réduites à leur taille d'affichage dans le thread d'icônes : le moteur
   logiciel de Slint redimensionnerait sinon l'image à chaque image (sans effet mesurable ici,
   mais moins de mémoire : 96 px au lieu de 256 px).
+
+## Phase 5
+
+- **Volume sans droits** : `CreateFileW("\\.\C:")` échoue avec « Accès refusé » pour un compte
+  non élevé, même membre des Administrateurs (jeton filtré par l'UAC) : `FSCTL_ENUM_USN_DATA`
+  et `FSCTL_READ_USN_JOURNAL` exigent l'élévation.
+- **Même référence par les deux chemins** : `FILE_ID_EXTD_DIR_INFO.FileId` (128 bits) contient,
+  sur NTFS, la référence de fichier de la MFT dans ses 8 premiers octets : numéro
+  d'enregistrement sur 48 bits, numéro de séquence sur 16 bits. Le dossier racine est
+  l'enregistrement 5 (référence `0x0005000000000005`).
+- **Réutilisation des numéros d'enregistrement** : NTFS recycle le numéro d'un élément supprimé
+  (seul le numéro de séquence change). Un index relu d'un cache périmé peut donc associer un
+  numéro à un élément disparu : vérifier nom, parent et nature avant de faire confiance à un
+  numéro déjà indexé.
+- **Liens physiques** : un enregistrement, plusieurs noms ; l'énumération de la MFT et le
+  parcours n'en gardent qu'un dans un index par enregistrement.
+- **Surveillance d'un volume entier** : `ReadDirectoryChangesW(bWatchSubtree = TRUE)` sur la
+  racine fonctionne sans droits ; les chemins reçus sont relatifs à la racine. Tampon de 512 Kio
+  et filtre limité aux noms et attributs pour éviter les débordements.
+- **Renommage dans la surveillance** : « ancien nom » puis « nouveau nom ». Traiter l'ancien nom
+  comme une suppression ferait disparaître tout le contenu d'un dossier renommé.
+- **Tube réservé à l'utilisateur** : DACL `D:P(A;;GA;;;<SID>)` (SID tiré de `TokenUser`),
+  `FILE_FLAG_FIRST_PIPE_INSTANCE` (une seconde création du même nom échoue),
+  `PIPE_REJECT_REMOTE_CLIENTS`, puis `GetNamedPipeClientProcessId` pour vérifier le client.
+  `WaitForMultipleObjects` sur le pseudo-handle `GetCurrentProcess()` échoue (`WAIT_FAILED`) :
+  utiliser un vrai handle de processus.
+- **Élévation** : `ShellExecuteExW` avec le verbe `runas` et `SEE_MASK_NOCLOSEPROCESS` donne le
+  handle du processus élevé (et son pid par `GetProcessId`) ; un refus de l'utilisateur est une
+  erreur de l'appel.
+- **Jeton non élevé depuis un processus élevé** : `GetTokenInformation(TokenElevationType)`
+  vaut `TokenElevationTypeFull`, et `TokenLinkedToken` donne le jeton restreint ; le dupliquer
+  en jeton d'emprunt (`SecurityImpersonation`) pour `AccessCheck`. Le descripteur d'un dossier
+  connu par sa référence s'obtient par `OpenFileById` (droit `READ_CONTROL`) puis
+  `GetSecurityInfo` (propriétaire, groupe et DACL sont tous exigés par `AccessCheck`).
+- **Mémoire de l'allocateur** : un `Vec` plein qui reçoit un élément double sa capacité. Pour
+  un index de plus de 100 Mo relu depuis le disque (capacité exacte), la première insertion
+  coûtait 110 Mo : croissance par pas d'1/16 avec `reserve_exact`.
+- **Priorité arrière-plan** : `SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN)`
+  abaisse aussi les priorités d'E/S et de mémoire du thread (pool `rayon` dédié avec
+  `start_handler`).
