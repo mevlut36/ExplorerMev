@@ -7,8 +7,9 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap5 rescap">
+  IgnorableNamespaces="uap uap5 desktop6 rescap">
 
   <Identity Name="ExplorerMev" Publisher="{{PUBLISHER}}" Version="{{VERSION}}" ProcessorArchitecture="x64" />
 
@@ -17,6 +18,9 @@
     <PublisherDisplayName>{{PUBLISHER_DISPLAY}}</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>Explorateur de fichiers rapide et léger pour Windows 11.</Description>
+    <!-- L'option « explorateur par défaut » écrit sous HKCU\Software\Classes : ces clés doivent
+         être celles de l'utilisateur, vues par l'Explorateur, pas une copie privée du paquet. -->
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
   </Properties>
 
   <Dependencies>
@@ -53,5 +57,7 @@
   <Capabilities>
     <!-- Application Win32 : accès complet aux fichiers de l'utilisateur, comme l'Explorateur -->
     <rescap:Capability Name="runFullTrust" />
+    <!-- Nécessaire pour désactiver la virtualisation du registre (RegistryWriteVirtualization) -->
+    <rescap:Capability Name="unvirtualizedResources" />
   </Capabilities>
 </Package>

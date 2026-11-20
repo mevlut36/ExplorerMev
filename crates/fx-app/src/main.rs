@@ -148,21 +148,31 @@ fn parse_args() -> anyhow::Result<Args> {
     Ok(a)
 }
 
+/// Dans un paquet MSIX qui isole le registre, les clés écrites ne seraient jamais vues par
+/// l'Explorateur : on refuse plutôt que de réussir sans effet.
+fn refuse_if_registry_virtualized() -> Option<ExitCode> {
+    if !fx_win::process::registry_is_virtualized() {
+        return None;
+    }
+    eprintln!(
+        "Ce paquet isole le registre : installez la dernière version du paquet MSIX (script \
+         packaging/package.ps1) ou utilisez la version portable."
+    );
+    Some(ExitCode::FAILURE)
+}
+
 /// `--default-explorer on|off|status` : Win+E et ouverture des dossiers (installation,
 /// désinstallation, scripts).
 fn default_explorer(action: &str) -> ExitCode {
     use fx_win::default_explorer::{DefaultExplorer, DefaultState};
-    if fx_win::process::is_packaged() {
-        eprintln!(
-            "Impossible depuis le paquet MSIX (le registre y est isolé) : utilisez la version portable."
-        );
-        return ExitCode::FAILURE;
+    if let Some(code) = refuse_if_registry_virtualized() {
+        return code;
     }
     let key = DefaultExplorer::default();
     let result: anyhow::Result<String> = (|| {
         Ok(match action {
             "on" => {
-                let exe = std::env::current_exe()?;
+                let exe = fx_win::process::launch_path()?;
                 key.enable(&exe)?;
                 format!("ExplorerMev est l'explorateur par défaut : {}", exe.display())
             }
@@ -200,17 +210,14 @@ fn default_explorer(action: &str) -> ExitCode {
 /// désinstallation, scripts).
 fn win_e(action: &str) -> ExitCode {
     use fx_win::win_e::{WinEKey, WinEState};
-    if fx_win::process::is_packaged() {
-        eprintln!(
-            "Win+E ne peut pas être remplacé depuis le paquet MSIX (le registre y est isolé) :              utilisez la version portable."
-        );
-        return ExitCode::FAILURE;
+    if let Some(code) = refuse_if_registry_virtualized() {
+        return code;
     }
     let key = WinEKey::default();
     let result: anyhow::Result<String> = (|| {
         Ok(match action {
             "on" => {
-                let exe = std::env::current_exe()?;
+                let exe = fx_win::process::launch_path()?;
                 key.enable(&exe)?;
                 format!("Win+E ouvre désormais {}.", exe.display())
             }

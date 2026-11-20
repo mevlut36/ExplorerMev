@@ -99,8 +99,8 @@ pub fn background_thread() -> bool {
 }
 
 /// Le processus tourne-t-il dans un paquet MSIX ? Dans ce cas les écritures sous `HKCU` et dans
-/// `%APPDATA%` / `%LOCALAPPDATA%` sont redirigées vers un emplacement privé du paquet : visibles
-/// de l'application seule (ce qui convient aux réglages, pas à « Remplacer Win+E »).
+/// `%APPDATA%` / `%LOCALAPPDATA%` sont, par défaut, redirigées vers un emplacement privé du
+/// paquet (voir [`registry_is_virtualized`]).
 pub fn is_packaged() -> bool {
     use windows::Win32::Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_INSUFFICIENT_BUFFER};
     use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
@@ -111,10 +111,96 @@ pub fn is_packaged() -> bool {
     r != APPMODEL_ERROR_NO_PACKAGE && (r == ERROR_INSUFFICIENT_BUFFER || r.0 == 0)
 }
 
+/// Dossier d'installation du paquet (`C:\Program Files\WindowsApps\…`), s'il y en a un.
+pub fn package_path() -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows::Win32::Storage::Packaging::Appx::GetCurrentPackagePath;
+    use windows::core::PWSTR;
+    let mut len = 0u32;
+    // SAFETY: longueur locale, aucun tampon : la fonction renvoie la taille nécessaire.
+    let r = unsafe { GetCurrentPackagePath(&mut len, None) };
+    if r != ERROR_INSUFFICIENT_BUFFER || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; len as usize];
+    // SAFETY: tampon local de `len` unités UTF-16, taille transmise.
+    let r = unsafe { GetCurrentPackagePath(&mut len, Some(PWSTR(buf.as_mut_ptr()))) };
+    if r.0 != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..end])))
+}
+
+/// Le manifeste désactive-t-il la virtualisation d'écriture du registre
+/// (`<desktop6:RegistryWriteVirtualization>disabled</…>`) ?
+pub fn manifest_disables_registry_virtualization(manifest: &str) -> bool {
+    manifest
+        .to_ascii_lowercase()
+        .contains("registrywritevirtualization>disabled<")
+}
+
+/// Les écritures dans le registre sont-elles redirigées vers un emplacement privé du paquet ?
+/// `false` hors paquet, et dans un paquet dont le manifeste désactive la virtualisation. Dans un
+/// paquet qui la garde, une clé écrite (par exemple celle de l'option « explorateur par
+/// défaut ») ne serait jamais vue par l'Explorateur.
+pub fn registry_is_virtualized() -> bool {
+    if !is_packaged() {
+        return false;
+    }
+    // Manifeste illisible : on suppose la virtualisation (refus plutôt qu'une option sans effet).
+    package_path()
+        .and_then(|p| std::fs::read_to_string(p.join("AppxManifest.xml")).ok())
+        .is_none_or(|m| !manifest_disables_registry_virtualization(&m))
+}
+
+/// Chemin du programme à enregistrer dans le registre pour qu'un autre processus le lance.
+/// Hors paquet : l'exécutable courant. Dans un paquet : l'**alias d'exécution**
+/// (`%LOCALAPPDATA%\Microsoft\WindowsApps\<exe>`), seul chemin lançable de l'extérieur et qui
+/// survit aux mises à jour (le dossier du paquet porte sa version).
+pub fn launch_path() -> std::io::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    if !is_packaged() {
+        return Ok(exe);
+    }
+    let name = exe
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("nom de l'exécutable introuvable"))?;
+    let local =
+        std::env::var_os("LOCALAPPDATA").ok_or_else(|| std::io::Error::other("LOCALAPPDATA absent"))?;
+    let alias = std::path::PathBuf::from(local)
+        .join("Microsoft")
+        .join("WindowsApps")
+        .join(name);
+    if alias.exists() {
+        Ok(alias)
+    } else {
+        Err(std::io::Error::other(format!(
+            "alias d'exécution introuvable : {}",
+            alias.display()
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_binary_is_not_packaged() {
-        assert!(!super::is_packaged());
+        assert!(!is_packaged());
+        assert!(package_path().is_none());
+        assert!(!registry_is_virtualized());
+        assert_eq!(launch_path().ok(), std::env::current_exe().ok());
+    }
+
+    #[test]
+    fn manifest_virtualization_flag_is_read() {
+        let off = r#"<Properties><DisplayName>x</DisplayName>
+            <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization></Properties>"#;
+        assert!(manifest_disables_registry_virtualization(off));
+        let on = off.replace("disabled", "enabled");
+        assert!(!manifest_disables_registry_virtualization(&on));
+        assert!(!manifest_disables_registry_virtualization("<Package/>"));
     }
 }

@@ -45,12 +45,13 @@ loupe (omise sous 48 px, où elle devient illisible). `app.ico` : 16, 24, 32, 48
 
 ## Non vérifié
 
-- **Installation du MSIX** : jamais installé. Cela exige d'approuver le certificat auto-signé
-  (invite administrateur, modification des magasins de confiance de la machine), ce que je n'ai
-  pas fait sans votre accord. Donc non observés : l'installation elle-même, l'alias `explorermev`
-  dans un terminal, les tuiles, la détection d'identité de paquet (testée **hors** paquet
-  seulement), le refus de « explorateur par défaut » dans le paquet, l'emplacement réel des réglages
-  dans le paquet, le lancement de l'assistant élevé depuis le paquet.
+- **Installation du MSIX** : n'a pas été faite par moi (elle exige d'approuver le certificat
+  auto-signé, invite administrateur) mais par l'utilisateur, qui l'a installé : l'installation
+  réussit et l'alias `explorermev` fonctionne dans un terminal ; en lançant
+  `explorermev --default-explorer on`, il a obtenu le refus prévu pour un paquet qui isole le
+  registre, ce qui prouve que la détection d'identité de paquet fonctionne en réel. Toujours non
+  observés : les tuiles, l'emplacement réel des réglages dans le paquet, le lancement de
+  l'assistant élevé depuis le paquet.
 - **Installation par winget** : l'URL de l'archive n'existe pas ; `winget install` n'a pas été
   essayé (il faudrait aussi activer les manifestes locaux, réglage administrateur).
 - **Smartscreen / antivirus** sur un exécutable non signé : non évalué.
@@ -79,3 +80,18 @@ loupe (omise sous 48 px, où elle devient illisible). `app.ico` : 16, 24, 32, 48
 - **Non vérifié** : la touche Win+E elle-même (aurait demandé une frappe simulée, que je
   m'interdis ; la même commande est déjà testée sur une clé de test) ; l'option activée depuis la
   palette (la confirmation) plutôt que par `--default-explorer on` (même code d'écriture).
+
+## « Explorateur par défaut » dans le paquet MSIX
+
+Constaté par l'utilisateur : `explorermev --default-explorer on` depuis le paquet installé a été
+refusé (« le registre y est isolé »). Réponse : au lieu d'interdire l'option dans le paquet, le
+manifeste désactive la virtualisation d'écriture du registre (`unvirtualizedResources`), la
+commande enregistrée désigne l'alias d'exécution, et l'application refuse seulement si le paquet
+installé virtualise encore.
+
+- **Vérifié** : le paquet se construit (schéma validé par `makeappx`), est signé par le
+  certificat déjà approuvé, a une version (0.1.0.7770) supérieure à celle installée (0.1.0.0) ;
+  son manifeste contient bien la désactivation et la capacité ; 121 tests réussis (lecture du
+  drapeau du manifeste, chemin de lancement hors paquet).
+- **Non vérifié** : l'effet réel dans le paquet mis à jour (que Windows ouvre ExplorerMev pour un
+  dossier par l'alias). À observer après `Add-AppxPackage`.

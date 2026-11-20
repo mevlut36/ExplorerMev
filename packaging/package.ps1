@@ -25,6 +25,7 @@ param(
     [string]$PublisherDisplay = "ExplorerMev",
     [string]$InstallerUrl,
     [string]$TimestampUrl,
+    [int]$Revision = -1,
     [switch]$SkipBuild
 )
 $ErrorActionPreference = "Stop"
@@ -44,8 +45,13 @@ $signtool = Join-Path $sdk.FullName "x64\signtool.exe"
 $cargo = Get-Content (Join-Path $root "Cargo.toml") -Raw
 if ($cargo -notmatch '(?ms)\[workspace\.package\].*?^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') { throw "version introuvable dans Cargo.toml" }
 $ver3 = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
-$ver4 = "$ver3.0"
-"Version : $ver3"
+# Quatrième nombre de la version du paquet : un MSIX installé ne se met à jour que vers une
+# version plus élevée. Par défaut, les heures écoulées depuis le 2026-01-01 (croissant à chaque
+# production) ; -Revision 0 pour une version publiée.
+if ($Revision -lt 0) { $Revision = [int][math]::Floor(((Get-Date) - [datetime]"2026-01-01").TotalHours) }
+if ($Revision -gt 65535) { throw "Revision hors limites (0-65535) : $Revision" }
+$ver4 = "$ver3.$Revision"
+"Version : $ver3 (paquet $ver4)"
 
 # --- compilation ---
 if (-not $SkipBuild) {

@@ -325,10 +325,22 @@ reproduire.
 - **Identité de paquet** : `GetCurrentPackageFullName` renvoie `APPMODEL_ERROR_NO_PACKAGE`
   (15700) hors paquet, `ERROR_INSUFFICIENT_BUFFER` avec un tampon nul dans un paquet. Vérifié
   hors paquet seulement.
-- **Registre isolé dans un paquet** (documenté par Microsoft, **non vérifié ici**, le paquet
-  n'ayant pas été installé) : les écritures sous `HKCU` et dans `%APPDATA%` d'une application
-  empaquetée sont redirigées vers un emplacement privé du paquet ; l'Explorateur ne voit donc
-  jamais les clés de l'option « explorateur par défaut ». L'option est refusée dans le paquet.
+- **Registre isolé dans un paquet** : les écritures sous `HKCU` et dans `%APPDATA%` d'une
+  application empaquetée sont, par défaut, redirigées vers un emplacement privé du paquet ;
+  l'Explorateur ne verrait donc jamais les clés de l'option « explorateur par défaut ». Le
+  manifeste la désactive : `<desktop6:RegistryWriteVirtualization>disabled</…>` dans
+  `Properties` (espace de noms `…/desktop/windows10/6`) et la capacité restreinte
+  `rescap:Capability Name="unvirtualizedResources"` (acceptée pour un paquet installé hors Store ;
+  `makeappx` valide le schéma). **Effet réel non encore observé.** L'application lit le manifeste
+  installé (`GetCurrentPackagePath` puis `AppxManifest.xml`) et refuse l'option si la
+  virtualisation est active (paquet plus ancien) plutôt que de réussir sans effet.
+- **Chemin à enregistrer dans un paquet** : le dossier du paquet porte sa version
+  (`…\WindowsApps\ExplorerMev_0.1.0.7770_x64__<id>`) et n'est pas lançable depuis un autre
+  processus. La commande enregistrée désigne l'alias d'exécution
+  `%LOCALAPPDATA%\Microsoft\WindowsApps\explorermev.exe`, qui survit aux mises à jour.
+- **Version d'un paquet** : un MSIX installé ne se met à jour que vers une version plus
+  élevée (4ᵉ nombre, 0 à 65535) ; `package.ps1` prend par défaut les heures écoulées depuis le
+  2026-01-01 (`-Revision 0` pour une version publiée).
 - **Signature** : `signtool verify /pa` d'un paquet signé par un certificat auto-signé échoue
   avec « A certificate chain processed, but terminated in a root certificate which is not
   trusted » ; `Get-AuthenticodeSignature` renvoie `UnknownError`. C'est le comportement attendu

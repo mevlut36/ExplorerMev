@@ -31,8 +31,9 @@ Import-Certificate -FilePath .\ExplorerMev.cer -CertStoreLocation Cert:\LocalMac
 Add-AppxPackage .\ExplorerMev_0.1.0_x64.msix
 ```
 
-Ces deux commandes n'ont pas été exécutées pendant le développement (voir
-[Limites connues](#limites-connues)). Pour désinstaller : `Get-AppxPackage ExplorerMev | Remove-AppxPackage`,
+Pour **mettre à jour** un paquet installé, produire le nouveau avec `packaging\package.ps1` (son
+numéro de version croît à chaque production) puis relancer `Add-AppxPackage` ; le certificat est
+réutilisé, il n'y a rien à ré-approuver. Pour désinstaller : `Get-AppxPackage ExplorerMev | Remove-AppxPackage`,
 puis retirer le certificat (`Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -like
 "CN=ExplorerMev*" | Remove-Item`). Une distribution publique exige un certificat de signature de code
 approuvé.
@@ -156,11 +157,14 @@ Détails et limites : [phase 3](docs/mesures/phase3.md), [phase 4](docs/mesures/
 - **Indexation par la MFT** (assistant élevé) : le code, le protocole et le filtre d'accès sont
   testés, mais l'assistant n'a **jamais tourné élevé** : durée d'énumération et mémoire non
   mesurées. Le comportement de l'élévation depuis le paquet MSIX n'est pas vérifié non plus.
-- **Paquet MSIX** : construit, signé et vérifié (intégrité, schéma du manifeste), mais **jamais
-  installé** : le certificat est auto-signé et n'est approuvé nulle part sur la machine de
-  développement. Dans le paquet, « explorateur par défaut » est refusé (le registre y est isolé) et les
-  réglages sont lus et écrits dans un emplacement privé du paquet
-  (`%LOCALAPPDATA%\Packages\…\LocalCache`), pas dans `%APPDATA%\ExplorerMev`.
+- **Paquet MSIX** : installé et lancé par l'utilisateur (alias `explorermev` fonctionnel,
+  identité de paquet détectée), certificat auto-signé approuvé à la main. Le manifeste désactive
+  la virtualisation d'écriture du registre pour que « explorateur par défaut » fonctionne dans
+  le paquet (chemin enregistré : l'alias `%LOCALAPPDATA%\Microsoft\WindowsApps\explorermev.exe`) ;
+  cet effet **n'a pas encore été observé**. Un paquet installé avant cette version refuse
+  l'option avec un message (mettre le paquet à jour). Les réglages sont lus et écrits dans un
+  emplacement privé du paquet (`%LOCALAPPDATA%\Packages\…\LocalCache`), pas dans
+  `%APPDATA%\ExplorerMev`.
 - **OneDrive** : jamais de lecture, de vignette ni d'aperçu d'un fichier « en ligne seulement »,
   par construction ; non vérifié sur des fichiers réels de ce type (aucun sur la machine de
   développement).

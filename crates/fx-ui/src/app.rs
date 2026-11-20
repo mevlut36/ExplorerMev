@@ -1287,15 +1287,18 @@ impl App {
     /// dossiers depuis les autres programmes. L'activation est confirmée ; la désactivation ne
     /// retire que ce qu'ExplorerMev a posé.
     fn set_default_explorer(self: &Rc<Self>, on: bool) {
-        if fx_win::process::is_packaged() {
+        // Paquet MSIX d'une version qui isole encore le registre : l'option n'aurait aucun effet.
+        if fx_win::process::registry_is_virtualized() {
             self.active_pane().flash_status(
-                "Impossible depuis le paquet MSIX (registre isolé) : utilisez la version portable.".into(),
+                "Ce paquet isole le registre : installez la dernière version du paquet MSIX ou utilisez la version portable."
+                    .into(),
             );
             return;
         }
         let owner = self.hwnd.get().unwrap_or(0);
         let id = self.active_pane().id;
-        let exe = std::env::current_exe();
+        // Chemin à enregistrer : l'exécutable, ou l'alias d'exécution dans un paquet.
+        let exe = fx_win::process::launch_path();
         let posted = self.host_post_raw(move |_| {
             use fx_win::default_explorer::DefaultExplorer;
             let key = DefaultExplorer::default();
